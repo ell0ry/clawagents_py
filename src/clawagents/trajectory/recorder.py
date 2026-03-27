@@ -99,6 +99,22 @@ class RunSummary:
     trajectory_file: str = ""
 
 
+@dataclass
+class PTRLContext:
+    """Captured data for deferred PTRL processing (judge + lessons).
+
+    Created by ``run_agent_graph`` when ``learn_mode="deferred"``.  Contains
+    serialised snapshots of the run summary and turn records so the caller can
+    run ``judge_run`` / ``extract_lessons`` later via ``ClawAgent.reflect()``.
+    """
+
+    task: str
+    result: str
+    summary_dict: dict[str, Any]
+    turn_dicts: list[dict[str, Any]]
+    model: str = ""
+
+
 # ─── Feature 3: Format vs. Logic Failure Classification ───────────────────
 
 _FORMAT_ERROR_PATTERNS = (

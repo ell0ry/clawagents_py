@@ -1,14 +1,18 @@
+import logging
 import os
 import asyncio
 from pathlib import Path
 from typing import Optional, List, Dict, Any, Union
 
-from clawagents.providers.llm import LLMProvider
+from clawagents.providers.llm import LLMMessage, LLMProvider
 from clawagents.tools.registry import ToolRegistry, Tool, ToolResult
 from clawagents.graph.agent_loop import (
     run_agent_graph, AgentState, OnEvent,
     BeforeLLMHook, BeforeToolHook, AfterToolHook,
 )
+from clawagents.trajectory.recorder import PTRLContext
+
+logger = logging.getLogger(__name__)
 
 
 class LangChainToolAdapter:
@@ -72,6 +76,7 @@ class ClawAgent:
         trajectory: bool = False,
         rethink: bool = False,
         learn: bool = False,
+        learn_mode: str = "",
         max_iterations: int = 200,
         preview_chars: int = 120,
         response_chars: int = 500,
@@ -89,9 +94,11 @@ class ClawAgent:
         self.trajectory = trajectory
         self.rethink = rethink
         self.learn = learn
+        self.learn_mode = learn_mode
         self.max_iterations = max_iterations
         self.preview_chars = preview_chars
         self.response_chars = response_chars
+        self._ptrl_queue: list[PTRLContext] = []
 
     async def invoke(
         self,
@@ -99,8 +106,9 @@ class ClawAgent:
         max_iterations: Optional[int] = None,
         on_event: Optional[OnEvent] = None,
         timeout_s: float = 0,
+        history: Optional[List[LLMMessage]] = None,
     ) -> AgentState:
-        return await run_agent_graph(
+        state = await run_agent_graph(
             task=task,
             llm=self.llm,
             tools=self.tools,
@@ -116,10 +124,15 @@ class ClawAgent:
             trajectory=self.trajectory,
             rethink=self.rethink,
             learn=self.learn,
+            learn_mode=self.learn_mode,
             preview_chars=self.preview_chars,
             response_chars=self.response_chars,
             timeout_s=timeout_s,
+            history=history,
         )
+        if state.ptrl_context is not None:
+            self._ptrl_queue.append(state.ptrl_context)
+        return state
 
     # ── Convenience hook methods ──────────────────────────────────────
 
@@ -153,6 +166,74 @@ class ClawAgent:
             return [*messages, LLMMessage(role="user", content=f"[Context] {text}")]
 
         self.before_llm = hook
+
+    # ── Deferred PTRL ──────────────────────────────────────────────
+
+    @property
+    def pending_reflections(self) -> int:
+        """Number of runs queued for deferred PTRL processing."""
+        return len(self._ptrl_queue)
+
+    def clear_ptrl_queue(self) -> int:
+        """Discard pending PTRL data without processing. Returns count discarded."""
+        count = len(self._ptrl_queue)
+        self._ptrl_queue.clear()
+        return count
+
+    async def reflect(self) -> Dict[str, Any]:
+        """Run deferred PTRL (judge + lesson extraction) on accumulated runs.
+
+        Processes all runs accumulated since the last ``reflect()`` call.
+        Returns a summary dict.  Safe to call when the queue is empty.
+        """
+        if not self._ptrl_queue:
+            return {"runs_processed": 0, "judge_scores": [], "lessons_extracted": 0}
+
+        from clawagents.trajectory.judge import judge_run
+        from clawagents.trajectory.lessons import (
+            extract_lessons, save_lessons, should_extract_lessons,
+        )
+
+        queue = self._ptrl_queue[:]
+        self._ptrl_queue.clear()
+
+        judge_scores: list[int | None] = []
+        lessons_extracted = 0
+
+        for ctx in queue:
+            # Judge
+            try:
+                judge_result = await judge_run(
+                    self.llm, ctx.task, ctx.summary_dict,
+                    ctx.result, ctx.turn_dicts,
+                )
+                judge_scores.append(judge_result.get("judge_score"))
+            except Exception:
+                logger.debug("Deferred judge failed", exc_info=True)
+                judge_scores.append(None)
+
+            # Lesson extraction (quality-gated)
+            try:
+                if should_extract_lessons(ctx.summary_dict):
+                    lessons_text = await extract_lessons(
+                        self.llm, ctx.summary_dict, ctx.turn_dicts,
+                    )
+                    if lessons_text:
+                        save_lessons(
+                            lessons_text,
+                            ctx.summary_dict.get("task", ""),
+                            ctx.summary_dict.get("outcome", ""),
+                            model=ctx.model,
+                        )
+                        lessons_extracted += 1
+            except Exception:
+                logger.debug("Deferred lesson extraction failed", exc_info=True)
+
+        return {
+            "runs_processed": len(queue),
+            "judge_scores": judge_scores,
+            "lessons_extracted": lessons_extracted,
+        }
 
     async def compare(
         self,
@@ -223,6 +304,7 @@ def create_claw_agent(
     trajectory: Optional[bool] = None,
     rethink: Optional[bool] = None,
     learn: Optional[bool] = None,
+    learn_mode: Optional[str] = None,
     max_iterations: Optional[int] = None,
     preview_chars: Optional[int] = None,
     response_chars: Optional[int] = None,
@@ -307,6 +389,8 @@ def create_claw_agent(
         learn = os.environ.get("CLAW_LEARN", "").lower() in ("1", "true", "yes")
     if learn:
         trajectory = True
+    if learn_mode is None:
+        learn_mode = os.environ.get("CLAW_LEARN_MODE", "")
     if max_iterations is None:
         raw = os.environ.get("MAX_ITERATIONS", "")
         max_iterations = int(raw) if raw.isdigit() else 200
@@ -416,7 +500,8 @@ def create_claw_agent(
         streaming=streaming, use_native_tools=use_native_tools,
         context_window=context_window, on_event=on_event,
         before_llm=composed_before_llm, trajectory=trajectory,
-        rethink=rethink, learn=learn, max_iterations=max_iterations,
+        rethink=rethink, learn=learn, learn_mode=learn_mode,
+        max_iterations=max_iterations,
         preview_chars=preview_chars, response_chars=response_chars,
     )
 

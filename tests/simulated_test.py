@@ -600,6 +600,23 @@ async def main():
     check("maximum" in state_max.result.lower() or "reached" in state_max.result.lower(), "max rounds: state.result set")
     check(state_max.status == "done", "max rounds: status is done")
 
+    # ━━━ 24b. Max Rounds Emits final_content ━━━━━━━━━━━━━━━━━━━━━━━━━━
+    section("24b. Max Rounds Emits final_content")
+
+    max_responses_b = [f'```json\n{{"tool": "calculate", "args": {{"expression": "{i}+1"}}}}\n```' for i in range(20)]
+    max_llm_b = MockLLM(max_responses_b)
+    max_reg_b = ToolRegistry()
+    max_reg_b.register(MathTool())
+    e_max, h_max = collect_events()
+    await run_agent_graph(
+        "Max rounds fc", max_llm_b, max_reg_b,
+        streaming=False, on_event=h_max,
+        max_iterations=5,
+    )
+    check(any(e["kind"] == "final_content" for e in e_max), "max rounds: final_content emitted")
+    fc_max = next((e for e in e_max if e["kind"] == "final_content"), None)
+    check(fc_max is not None and fc_max["data"].get("content", ""), "max rounds: final_content has content")
+
     # ━━━ 25. Empty Compaction Summary Handled ━━━━━━━━━━━━━━━━━━━━━━━━━
     section("25. Empty Compaction Summary Handled")
 

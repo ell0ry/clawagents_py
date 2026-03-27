@@ -31,9 +31,12 @@ import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Literal, Optional
+from typing import TYPE_CHECKING, Any, Callable, Literal, Optional
 
 from clawagents.providers.llm import LLMProvider, LLMMessage, LLMResponse, NativeToolSchema, NativeToolCall, strip_thinking_tokens
+
+if TYPE_CHECKING:
+    from clawagents.trajectory.recorder import PTRLContext
 from clawagents.tools.registry import ToolRegistry, ParsedToolCall, ToolResult
 
 logger = logging.getLogger(__name__)
@@ -224,6 +227,7 @@ class AgentState:
     max_iterations: int
     tool_calls: int
     trajectory_file: str = ""
+    ptrl_context: "PTRLContext | None" = None
 
 
 BASE_SYSTEM_PROMPT = """You are a ClawAgent, an AI assistant that helps users accomplish tasks using tools. You respond with text and tool calls.
@@ -905,6 +909,7 @@ def _looks_like_truncated_json(text: str) -> bool:
 # ─── ReAct Loop ──────────────────────────────────────────────────────────
 
 MAX_TOOL_ROUNDS = 1000
+_MAX_EMPTY_RESPONSE_RETRIES = 2
 
 
 async def run_agent_graph(
@@ -923,9 +928,11 @@ async def run_agent_graph(
     trajectory: bool = False,
     rethink: bool = False,
     learn: bool = False,
+    learn_mode: str = "",
     preview_chars: int = 120,
     response_chars: int = 500,
     timeout_s: float = 0,
+    history: list[LLMMessage] | None = None,
 ) -> AgentState:
     """Single ReAct loop: LLM → tools → LLM → tools → ... → final answer."""
     registry = tools or ToolRegistry()
@@ -935,6 +942,13 @@ async def run_agent_graph(
     tool_desc = registry.describe_for_llm() if not use_native_tools else ""
     loop_tracker = _ToolCallTracker()
     emit = on_event or _default_on_event
+
+    # ── Resolve learn_mode ──
+    if not learn_mode:
+        learn_mode = "blocking" if learn else "off"
+    elif learn_mode == "deferred":
+        learn = True
+        trajectory = True
 
     # Feature C + F: detect task type for adaptive rethink threshold
     _task_type = "general"
@@ -971,8 +985,10 @@ async def run_agent_graph(
 
     messages: list[LLMMessage] = [
         LLMMessage(role="system", content=f"{prompt_to_use}\n\n{tool_desc}"),
-        LLMMessage(role="user", content=task),
     ]
+    if history:
+        messages.extend(history)
+    messages.append(LLMMessage(role="user", content=task))
     # Pre-flight: ensure initial payload fits in context window
     messages, tool_desc, native_schemas = _preflight_context_check(
         messages, context_window, tool_desc, native_schemas, registry, emit,
@@ -1016,6 +1032,9 @@ async def run_agent_graph(
     def _check_timeout():
         if timeout_s > 0 and (time.monotonic() - t0) > timeout_s:
             raise TimeoutError(f"Agent run exceeded {timeout_s}s global timeout")
+
+    _empty_response_retries = 0
+    _final_content_emitted = False
 
     try:
         for round_idx in range(effective_max_rounds):
@@ -1137,6 +1156,31 @@ async def run_agent_graph(
                     ))
                     continue
 
+                # Empty response after tool execution — the LLM likely
+                # produced only thinking tokens or nothing at all.  Nudge
+                # it to answer instead of silently treating this as "done".
+                _content_after_sanitize = _sanitize_assistant_text(response.content) if response.content else ""
+                if (
+                    not _content_after_sanitize
+                    and state.tool_calls > 0
+                    and _empty_response_retries < _MAX_EMPTY_RESPONSE_RETRIES
+                ):
+                    _empty_response_retries += 1
+                    emit("warn", {
+                        "message": (
+                            f"empty response after tool call — nudging LLM "
+                            f"(retry {_empty_response_retries}/{_MAX_EMPTY_RESPONSE_RETRIES})"
+                        ),
+                    })
+                    messages.append(LLMMessage(
+                        role="assistant", content=response.content or "", thinking=_thinking_content,
+                    ))
+                    messages.append(LLMMessage(
+                        role="user",
+                        content="Please provide your answer based on the tool results above.",
+                    ))
+                    continue
+
                 if recorder:
                     recorder.record_turn(
                         response_text=response.content or "",
@@ -1148,6 +1192,7 @@ async def run_agent_graph(
                 state.status = "done"
                 state.iterations += 1
                 emit("final_content", {"content": state.result})
+                _final_content_emitted = True
                 messages.append(LLMMessage(role="assistant", content=response.content, thinking=_thinking_content))
                 break
 
@@ -1239,6 +1284,7 @@ async def run_agent_graph(
                     "name": call.tool_name,
                     "success": tool_result.success,
                     "preview": preview,
+                    "tokens": _count_messages_tokens(messages, model=resolved_model_name),
                 })
 
                 # Record result hash for no-progress / circuit breaker detection
@@ -1386,6 +1432,7 @@ async def run_agent_graph(
                         "name": call.tool_name,
                         "success": result.success,
                         "preview": preview,
+                        "tokens": _count_messages_tokens(messages, model=resolved_model_name),
                     })
                     
                     if isinstance(output, str):
@@ -1515,6 +1562,11 @@ async def run_agent_graph(
         except (NotImplementedError, OSError):
             pass
 
+    # Guarantee final_content is emitted on ALL exit paths (circuit breaker,
+    # tool loop, ping-pong, max iterations, timeout, cancel, interrupted, etc.)
+    if not _final_content_emitted and state.result:
+        emit("final_content", {"content": state.result})
+
     elapsed = time.monotonic() - t0
     state.messages = messages
 
@@ -1526,48 +1578,60 @@ async def run_agent_graph(
         state.trajectory_file = run_summary.trajectory_file
         emit("context", {"message": f"trajectory saved to {run_summary.trajectory_file}"})
 
-    # ── Feature G: LLM-as-Judge verification ──
+    # ── PTRL post-processing (judge + lessons) ──
     if learn and recorder and run_summary:
-        try:
-            from dataclasses import asdict
-            from clawagents.trajectory.judge import judge_run
-            summary_dict = asdict(run_summary)
-            turn_dicts = [asdict(t) for t in recorder.turns]
-            judge_result = await judge_run(
-                llm, task, summary_dict, state.result, turn_dicts,
+        from dataclasses import asdict
+
+        if learn_mode == "deferred":
+            # Capture context for later processing via ClawAgent.reflect()
+            from clawagents.trajectory.recorder import PTRLContext
+            state.ptrl_context = PTRLContext(
+                task=task,
+                result=state.result or "",
+                summary_dict=asdict(run_summary),
+                turn_dicts=[asdict(t) for t in recorder.turns],
+                model=run_summary.model,
             )
-            run_summary.judge_score = judge_result.get("judge_score")
-            run_summary.judge_justification = judge_result.get("judge_justification", "")
-            emit("context", {
-                "message": f"LLM Judge: score={run_summary.judge_score}/3 — {run_summary.judge_justification[:80]}"
-            })
-        except Exception:
-            logger.debug("LLM-as-Judge failed", exc_info=True)
+        else:
+            # Blocking mode — run judge + lessons inline (original behavior)
 
-    # ── PTRL Layer 3: Post-run self-analysis (with quality gate) ──
-    if learn and recorder and run_summary:
-        try:
-            from dataclasses import asdict
-            from clawagents.trajectory.lessons import extract_lessons, save_lessons, should_extract_lessons
-            summary_dict = asdict(run_summary)
-
-            # Feature 1: Quality gate — only extract lessons from informative runs
-            if should_extract_lessons(summary_dict):
+            # Feature G: LLM-as-Judge verification
+            try:
+                from clawagents.trajectory.judge import judge_run
+                summary_dict = asdict(run_summary)
                 turn_dicts = [asdict(t) for t in recorder.turns]
-                lessons_text = await extract_lessons(llm, summary_dict, turn_dicts)
-                if lessons_text:
-                    save_lessons(
-                        lessons_text, run_summary.task, run_summary.outcome,
-                        model=run_summary.model,
-                    )
-                    emit("context", {"message": "PTRL: extracted and saved lessons from this run"})
-            else:
+                judge_result = await judge_run(
+                    llm, task, summary_dict, state.result, turn_dicts,
+                )
+                run_summary.judge_score = judge_result.get("judge_score")
+                run_summary.judge_justification = judge_result.get("judge_justification", "")
                 emit("context", {
-                    "message": f"PTRL: skipped lesson extraction (quality={run_summary.quality}, "
-                    f"mixed={run_summary.has_mixed_outcomes}, score={run_summary.run_score})"
+                    "message": f"LLM Judge: score={run_summary.judge_score}/3 — {run_summary.judge_justification[:80]}"
                 })
-        except Exception:
-            logger.debug("PTRL: post-run self-analysis failed", exc_info=True)
+            except Exception:
+                logger.debug("LLM-as-Judge failed", exc_info=True)
+
+            # PTRL Layer 3: Post-run self-analysis (with quality gate)
+            try:
+                from clawagents.trajectory.lessons import extract_lessons, save_lessons, should_extract_lessons
+                summary_dict = asdict(run_summary)
+
+                if should_extract_lessons(summary_dict):
+                    turn_dicts = [asdict(t) for t in recorder.turns]
+                    lessons_text = await extract_lessons(llm, summary_dict, turn_dicts)
+                    if lessons_text:
+                        save_lessons(
+                            lessons_text, run_summary.task, run_summary.outcome,
+                            model=run_summary.model,
+                        )
+                        emit("context", {"message": "PTRL: extracted and saved lessons from this run"})
+                else:
+                    emit("context", {
+                        "message": f"PTRL: skipped lesson extraction (quality={run_summary.quality}, "
+                        f"mixed={run_summary.has_mixed_outcomes}, score={run_summary.run_score})"
+                    })
+            except Exception:
+                logger.debug("PTRL: post-run self-analysis failed", exc_info=True)
 
     emit("agent_done", {
         "tool_calls": state.tool_calls,
