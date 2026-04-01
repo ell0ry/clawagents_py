@@ -9,7 +9,7 @@ Optimizations learned from deepagents/openclaw:
 import asyncio
 import json
 import re
-from typing import Any, Dict, List, Optional, Protocol
+from typing import Any, Dict, List, Optional, Protocol, Set
 
 
 class ToolResult:
@@ -145,6 +145,19 @@ class ToolRegistry:
                 parameters=tool.parameters,
             )
             for tool in self.list()
+        ]
+
+    def get_schemas_by_names(self, names: Set[str]) -> list:
+        """Return NativeToolSchema list for only the specified tool names."""
+        from clawagents.providers.llm import NativeToolSchema
+        return [
+            NativeToolSchema(
+                name=tool.name,
+                description=tool.description,
+                parameters=tool.parameters,
+            )
+            for tool in self.list()
+            if tool.name in names
         ]
 
     def parse_tool_call(self, response: str) -> Optional[Dict[str, Any]]:

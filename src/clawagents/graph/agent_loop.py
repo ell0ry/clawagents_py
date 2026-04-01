@@ -36,6 +36,7 @@ from typing import TYPE_CHECKING, Any, Callable, Literal, Optional
 from clawagents.providers.llm import LLMProvider, LLMMessage, LLMResponse, NativeToolSchema, NativeToolCall, strip_thinking_tokens
 
 if TYPE_CHECKING:
+    from clawagents.tools.catalog import ToolCatalog
     from clawagents.trajectory.recorder import PTRLContext
 from clawagents.tools.registry import ToolRegistry, ParsedToolCall, ToolResult
 
@@ -933,15 +934,25 @@ async def run_agent_graph(
     response_chars: int = 500,
     timeout_s: float = 0,
     history: list[LLMMessage] | None = None,
+    catalog: ToolCatalog | None = None,
 ) -> AgentState:
     """Single ReAct loop: LLM → tools → LLM → tools → ... → final answer."""
     registry = tools or ToolRegistry()
-    native_schemas: list[NativeToolSchema] | None = (
-        registry.to_native_schemas() if use_native_tools and tools else None
-    )
+    emit = on_event or _default_on_event
+
+    # Waterfall tool loading: when a catalog is provided, start with only
+    # tier-0 + keyword-preloaded schemas instead of all tools.
+    native_schemas: list[NativeToolSchema] | None = None
+    if catalog and use_native_tools and tools:
+        preloaded = catalog.preload_from_query(task)
+        if preloaded:
+            emit("context", {"message": f"waterfall: pre-loaded categories from query: {', '.join(preloaded)}"})
+        native_schemas = catalog.active_schemas()
+        emit("context", {"message": f"waterfall: {len(native_schemas)} tool schemas active (of {len(registry.list())} registered)"})
+    elif use_native_tools and tools:
+        native_schemas = registry.to_native_schemas()
     tool_desc = registry.describe_for_llm() if not use_native_tools else ""
     loop_tracker = _ToolCallTracker()
-    emit = on_event or _default_on_event
 
     # ── Resolve learn_mode ──
     if not learn_mode:
@@ -1067,6 +1078,11 @@ async def run_agent_graph(
                         emit("warn", {"message": "before_llm returned invalid value — ignored"})
                 except Exception as hook_err:
                     emit("warn", {"message": f"before_llm hook error: {hook_err}"})
+
+            # Waterfall: refresh native schemas after resolve_tools may have
+            # added new categories since the last iteration.
+            if catalog and use_native_tools:
+                native_schemas = catalog.active_schemas()
 
             buf, on_chunk = _make_buffer()
             try:

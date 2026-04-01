@@ -2,7 +2,7 @@ import logging
 import os
 import asyncio
 from pathlib import Path
-from typing import Optional, List, Dict, Any, Union
+from typing import TYPE_CHECKING, Optional, List, Dict, Any, Union
 
 from clawagents.providers.llm import LLMMessage, LLMProvider
 from clawagents.tools.registry import ToolRegistry, Tool, ToolResult
@@ -11,6 +11,9 @@ from clawagents.graph.agent_loop import (
     BeforeLLMHook, BeforeToolHook, AfterToolHook,
 )
 from clawagents.trajectory.recorder import PTRLContext
+
+if TYPE_CHECKING:
+    from clawagents.tools.catalog import ToolCatalog
 
 logger = logging.getLogger(__name__)
 
@@ -80,6 +83,7 @@ class ClawAgent:
         max_iterations: int = 200,
         preview_chars: int = 120,
         response_chars: int = 500,
+        catalog: Optional["ToolCatalog"] = None,
     ):
         self.llm = llm
         self.tools = tools
@@ -98,6 +102,7 @@ class ClawAgent:
         self.max_iterations = max_iterations
         self.preview_chars = preview_chars
         self.response_chars = response_chars
+        self.catalog = catalog
         self._ptrl_queue: list[PTRLContext] = []
 
     async def invoke(
@@ -129,6 +134,7 @@ class ClawAgent:
             response_chars=self.response_chars,
             timeout_s=timeout_s,
             history=history,
+            catalog=self.catalog,
         )
         if state.ptrl_context is not None:
             self._ptrl_queue.append(state.ptrl_context)
@@ -183,7 +189,8 @@ class ClawAgent:
     async def reflect(self) -> Dict[str, Any]:
         """Run deferred PTRL (judge + lesson extraction) on accumulated runs.
 
-        Processes all runs accumulated since the last ``reflect()`` call.
+        Merges all queued contexts into a single conversation-level context,
+        then runs one judge call and one lesson extraction call.
         Returns a summary dict.  Safe to call when the queue is empty.
         """
         if not self._ptrl_queue:
@@ -197,37 +204,39 @@ class ClawAgent:
         queue = self._ptrl_queue[:]
         self._ptrl_queue.clear()
 
+        # Merge all contexts from this conversation into one
+        merged = PTRLContext.merge(queue)
+
         judge_scores: list[int | None] = []
         lessons_extracted = 0
 
-        for ctx in queue:
-            # Judge
-            try:
-                judge_result = await judge_run(
-                    self.llm, ctx.task, ctx.summary_dict,
-                    ctx.result, ctx.turn_dicts,
-                )
-                judge_scores.append(judge_result.get("judge_score"))
-            except Exception:
-                logger.debug("Deferred judge failed", exc_info=True)
-                judge_scores.append(None)
+        # Single judge call for the entire conversation
+        try:
+            judge_result = await judge_run(
+                self.llm, merged.task, merged.summary_dict,
+                merged.result, merged.turn_dicts,
+            )
+            judge_scores.append(judge_result.get("judge_score"))
+        except Exception:
+            logger.debug("Deferred judge failed", exc_info=True)
+            judge_scores.append(None)
 
-            # Lesson extraction (quality-gated)
-            try:
-                if should_extract_lessons(ctx.summary_dict):
-                    lessons_text = await extract_lessons(
-                        self.llm, ctx.summary_dict, ctx.turn_dicts,
+        # Single lesson extraction for the entire conversation
+        try:
+            if should_extract_lessons(merged.summary_dict):
+                lessons_text = await extract_lessons(
+                    self.llm, merged.summary_dict, merged.turn_dicts,
+                )
+                if lessons_text:
+                    save_lessons(
+                        lessons_text,
+                        merged.summary_dict.get("task", ""),
+                        merged.summary_dict.get("outcome", ""),
+                        model=merged.model,
                     )
-                    if lessons_text:
-                        save_lessons(
-                            lessons_text,
-                            ctx.summary_dict.get("task", ""),
-                            ctx.summary_dict.get("outcome", ""),
-                            model=ctx.model,
-                        )
-                        lessons_extracted += 1
-            except Exception:
-                logger.debug("Deferred lesson extraction failed", exc_info=True)
+                    lessons_extracted += 1
+        except Exception:
+            logger.debug("Deferred lesson extraction failed", exc_info=True)
 
         return {
             "runs_processed": len(queue),
@@ -308,6 +317,7 @@ def create_claw_agent(
     max_iterations: Optional[int] = None,
     preview_chars: Optional[int] = None,
     response_chars: Optional[int] = None,
+    catalog: Optional["ToolCatalog"] = None,
 ) -> ClawAgent:
     """
     Create a ClawAgent with full-stack capabilities.
@@ -503,6 +513,7 @@ def create_claw_agent(
         rethink=rethink, learn=learn, learn_mode=learn_mode,
         max_iterations=max_iterations,
         preview_chars=preview_chars, response_chars=response_chars,
+        catalog=catalog,
     )
 
     # ── Sub-agent tool (always available) ──────────────────────────────

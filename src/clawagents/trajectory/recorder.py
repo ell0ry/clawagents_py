@@ -114,6 +114,143 @@ class PTRLContext:
     turn_dicts: list[dict[str, Any]]
     model: str = ""
 
+    @staticmethod
+    def merge(contexts: list["PTRLContext"]) -> "PTRLContext":
+        """Merge multiple PTRLContext objects into a single conversation-level context.
+
+        Combines tasks, results, turn records, and summary metrics so that
+        judge + lesson extraction runs once per conversation instead of once
+        per invoke() call.
+        """
+        if not contexts:
+            raise ValueError("Cannot merge an empty list of PTRLContext objects")
+        if len(contexts) == 1:
+            return contexts[0]
+
+        # ── Task: numbered list ──
+        task_lines = [f"{i + 1}. {ctx.task}" for i, ctx in enumerate(contexts)]
+        merged_task = f"Conversation with {len(contexts)} tasks:\n" + "\n".join(task_lines)
+
+        # ── Result & model: last context ──
+        merged_result = contexts[-1].result
+        merged_model = next(
+            (ctx.model for ctx in reversed(contexts) if ctx.model), ""
+        )
+
+        # ── Turn dicts: concatenate and re-index ──
+        merged_turns: list[dict[str, Any]] = []
+        for ctx in contexts:
+            for turn in ctx.turn_dicts:
+                reindexed = dict(turn)
+                reindexed["turn_index"] = len(merged_turns)
+                merged_turns.append(reindexed)
+
+        # ── Summary dict: aggregate metrics ──
+        summaries = [ctx.summary_dict for ctx in contexts]
+
+        # Additive fields
+        _SUM_FIELDS = (
+            "total_turns", "total_tool_calls", "mid_run_failures",
+            "format_failures", "logic_failures", "tokens_total",
+        )
+        merged_summary: dict[str, Any] = {}
+        for field in _SUM_FIELDS:
+            merged_summary[field] = sum(s.get(field, 0) for s in summaries)
+
+        # Duration: sum
+        merged_summary["duration_s"] = sum(s.get("duration_s", 0.0) for s in summaries)
+
+        # Weighted average: tool_success_rate (by total_tool_calls)
+        total_calls = merged_summary["total_tool_calls"]
+        if total_calls > 0:
+            merged_summary["tool_success_rate"] = sum(
+                s.get("tool_success_rate", 0.0) * s.get("total_tool_calls", 0)
+                for s in summaries
+            ) / total_calls
+        else:
+            merged_summary["tool_success_rate"] = 1.0
+
+        # Weighted average: run_score (by total_turns)
+        total_turns = merged_summary["total_turns"]
+        if total_turns > 0:
+            merged_run_score = round(
+                sum(
+                    s.get("run_score", 0) * s.get("total_turns", 0)
+                    for s in summaries
+                ) / total_turns
+            )
+        else:
+            merged_run_score = 0
+        merged_summary["run_score"] = merged_run_score
+
+        # Weighted average: verified_score (by total_turns, skip None)
+        scored = [
+            (s.get("verified_score"), s.get("total_turns", 0))
+            for s in summaries
+            if s.get("verified_score") is not None
+        ]
+        if scored:
+            wt = sum(t for _, t in scored) or 1
+            merged_summary["verified_score"] = sum(v * t for v, t in scored) / wt
+        else:
+            merged_summary["verified_score"] = None
+
+        # Last context fields
+        last = summaries[-1]
+        for field in ("outcome", "finish_reason"):
+            merged_summary[field] = last.get(field, "")
+
+        # OR across contexts
+        merged_summary["has_mixed_outcomes"] = any(
+            s.get("has_mixed_outcomes", False) for s in summaries
+        )
+
+        # Lowest verified_confidence
+        _CONFIDENCE_ORDER = {"high": 2, "medium": 1, "low": 0}
+        confidences = [
+            s.get("verified_confidence", "")
+            for s in summaries
+            if s.get("verified_confidence")
+        ]
+        if confidences:
+            merged_summary["verified_confidence"] = min(
+                confidences, key=lambda c: _CONFIDENCE_ORDER.get(c, -1)
+            )
+        else:
+            merged_summary["verified_confidence"] = ""
+
+        # First non-empty verified_method
+        merged_summary["verified_method"] = next(
+            (s.get("verified_method", "") for s in summaries if s.get("verified_method")),
+            "",
+        )
+
+        # Recompute quality from merged values
+        merged_summary["quality"] = _compute_quality(
+            merged_run_score,
+            merged_summary["mid_run_failures"],
+            total_turns,
+        )
+
+        # Combined task
+        merged_summary["task"] = merged_task
+
+        # Preserve model from last context
+        merged_summary["model"] = merged_model
+
+        # Copy remaining informational fields from first context
+        for field in ("task_type", "run_id", "trajectory_file"):
+            if field not in merged_summary:
+                merged_summary[field] = summaries[0].get(field, "")
+
+        return PTRLContext(
+            task=merged_task,
+            result=merged_result,
+            summary_dict=merged_summary,
+            turn_dicts=merged_turns,
+            model=merged_model,
+        )
+
 
 # ─── Feature 3: Format vs. Logic Failure Classification ───────────────────
 
