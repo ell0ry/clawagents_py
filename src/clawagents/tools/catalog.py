@@ -22,6 +22,7 @@ class ToolCategory:
     description: str
     tool_names: List[str]
     keywords: List[str] = field(default_factory=list)
+    instruction: str = ""
 
 
 class ToolCatalog:
@@ -97,6 +98,15 @@ class ToolCatalog:
             for tool in self._registry.list()
             if tool.name not in deferred
         ]
+
+    def active_instruction_sections(self) -> str:
+        """Return joined instruction text for all resolved categories."""
+        sections: list[str] = []
+        for cat_name in sorted(self._resolved):
+            cat = self._categories.get(cat_name)
+            if cat and cat.instruction:
+                sections.append(cat.instruction.strip())
+        return "\n\n".join(sections)
 
     def preload_from_query(self, task: str) -> list[str]:
         """Keyword-match the user query and auto-resolve matching categories.
@@ -188,9 +198,21 @@ def create_resolve_tools_tool(catalog: ToolCatalog) -> Tool:
                     f"Available: {category_names}"
                 )
 
+            # Include instruction sections so the model gets guidance
+            # immediately — not just on the next turn.
+            instructions: list[str] = []
+            for cat_name in loaded:
+                cat = catalog.categories.get(cat_name)
+                if cat and cat.instruction:
+                    instructions.append(cat.instruction.strip())
+
+            output = ". ".join(parts)
+            if instructions:
+                output += "\n\n" + "\n\n".join(instructions)
+
             return ToolResult(
                 success=len(skipped) == 0,
-                output=". ".join(parts),
+                output=output,
                 error=None if not skipped else f"Unknown: {', '.join(skipped)}",
             )
 

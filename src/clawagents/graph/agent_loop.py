@@ -994,8 +994,16 @@ async def run_agent_graph(
             prompt_to_use = prompt_to_use + preamble
             emit("context", {"message": "PTRL: injected lessons from past runs"})
 
+    # Store base prompt for per-turn rebuild when catalog defers instruction sections
+    _base_system_prompt: str | None = prompt_to_use if catalog else None
+
+    if _base_system_prompt is not None and catalog:
+        domain_text = catalog.active_instruction_sections()
+        sys_content = f"{_base_system_prompt}\n\n{domain_text}\n\n{tool_desc}" if domain_text else f"{_base_system_prompt}\n\n{tool_desc}"
+    else:
+        sys_content = f"{prompt_to_use}\n\n{tool_desc}"
     messages: list[LLMMessage] = [
-        LLMMessage(role="system", content=f"{prompt_to_use}\n\n{tool_desc}"),
+        LLMMessage(role="system", content=sys_content),
     ]
     if history:
         messages.extend(history)
@@ -1068,6 +1076,13 @@ async def run_agent_graph(
             messages = await _compact_if_needed(
                 messages, context_window, llm, emit, token_multiplier, resolved_model_name,
             )
+
+            # Waterfall: rebuild system message with active instruction sections
+            # (must run before before_llm so the hook can append on top)
+            if _base_system_prompt is not None and catalog:
+                domain_text = catalog.active_instruction_sections()
+                sys_content = f"{_base_system_prompt}\n\n{domain_text}\n\n{tool_desc}" if domain_text else f"{_base_system_prompt}\n\n{tool_desc}"
+                messages[0] = LLMMessage(role="system", content=sys_content)
 
             if before_llm:
                 try:
