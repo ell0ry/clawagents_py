@@ -93,6 +93,7 @@ class SkillStore:
     def __init__(self):
         self.skills: Dict[str, Skill] = {}
         self.skill_dirs: List[str] = []
+        self.active_skills: Dict[str, str] = {}  # name → content
 
     def add_directory(self, d: str | Path):
         path = Path(d)
@@ -134,6 +135,13 @@ class SkillStore:
     def get(self, name: str) -> Optional[Skill]:
         return self.skills.get(name)
 
+    def active_skill_prompt(self) -> Optional[str]:
+        """Return joined content of all activated skills, or None."""
+        if not self.active_skills:
+            return None
+        parts = [f"# Active Skill: {name}\n\n{content}" for name, content in self.active_skills.items()]
+        return "\n\n".join(parts)
+
 
 def create_skill_tools(store: SkillStore) -> List[Tool]:
     
@@ -165,11 +173,12 @@ def create_skill_tools(store: SkillStore) -> List[Tool]:
         async def execute(self, args: Dict[str, Any]) -> ToolResult:
             name = str(args.get("name", ""))
             skill = store.get(name)
-            
+
             if not skill:
                 available = ", ".join([s.name for s in store.list()])
                 return ToolResult(success=False, output="", error=f"Skill \"{name}\" not found. Available: {available or 'none'}")
-            
+
+            store.active_skills[skill.name] = skill.content
             return ToolResult(success=True, output=f"# Skill: {skill.name}\n\n{skill.content}")
 
     return [ListSkillsTool(), UseSkillTool()]

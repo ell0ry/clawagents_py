@@ -14,6 +14,7 @@ from clawagents.trajectory.recorder import PTRLContext
 
 if TYPE_CHECKING:
     from clawagents.tools.catalog import ToolCatalog
+    from clawagents.tools.skills import SkillStore
 
 logger = logging.getLogger(__name__)
 
@@ -453,6 +454,7 @@ def create_claw_agent(
 
     # ── Auto-discover skills from default locations ─────────────────────
     skill_summaries: Optional[str] = None
+    skill_store = None
     base_skill_dirs = _to_list(skills) if skills is not None else _auto_discover_skills()
     _bundled = _get_bundled_skills_dir()
     skill_dirs = (base_skill_dirs + [_bundled]) if (_bundled and os.path.isdir(_bundled)) else base_skill_dirs
@@ -503,6 +505,7 @@ def create_claw_agent(
     composed_before_llm = _compose_before_llm(
         memory_paths=memory_paths,
         skill_summaries=skill_summaries,
+        skill_store=skill_store,
     )
 
     agent = ClawAgent(
@@ -610,6 +613,7 @@ def _auto_discover_skills() -> list:
 def _compose_before_llm(
     memory_paths: list,
     skill_summaries: Optional[str],
+    skill_store: Optional["SkillStore"] = None,
 ) -> Optional[BeforeLLMHook]:
     """Compose memory loading + skill injection into one before_llm hook."""
     from clawagents.providers.llm import LLMMessage
@@ -619,7 +623,7 @@ def _compose_before_llm(
         from clawagents.memory.loader import load_memory_files
         memory_content = load_memory_files(memory_paths)
 
-    if not memory_content and not skill_summaries:
+    if not memory_content and not skill_summaries and not skill_store:
         return None
 
     def hook(messages: list) -> list:
@@ -628,6 +632,10 @@ def _compose_before_llm(
             inject_parts.append(memory_content)
         if skill_summaries:
             inject_parts.append(skill_summaries)
+        if skill_store:
+            active = skill_store.active_skill_prompt()
+            if active:
+                inject_parts.append(active)
 
         if inject_parts:
             joined = "\n\n".join(inject_parts)
