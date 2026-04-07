@@ -51,6 +51,7 @@ class EngineConfig(BaseSettings):
     streaming: bool = True
     gateway_api_key: str = ""
     claw_learn_model: str = ""
+    gemini_thinking_level: str = ""
 
 
 def load_config() -> EngineConfig:
@@ -68,6 +69,12 @@ def is_anthropic_model(model: str) -> bool:
 
 
 def get_default_model(config: EngineConfig) -> str:
+    # NOTE: Lines 76/78 only check openai_api_key, NOT openai_base_url.
+    # Local model servers (vLLM, Ollama, LM Studio) don't need an API key,
+    # so if you set OPENAI_BASE_URL without OPENAI_API_KEY the fallback
+    # skips OpenAI and picks whichever cloud key is present (e.g. Gemini).
+    # Workaround: set OPENAI_API_KEY=not-needed and/or PROVIDER=openai.
+    # TODO: treat openai_base_url as a valid signal for OpenAI-compatible.
     hint = os.getenv("PROVIDER", "").lower()
     if hint == "gemini" and config.gemini_api_key:
         return config.gemini_model

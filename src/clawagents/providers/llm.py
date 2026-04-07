@@ -609,6 +609,15 @@ def _serialize_gemini_parts(parts: Any) -> list[dict[str, Any]] | None:
                 d["thought_signature"] = p.thought_signature
         if d:
             serialized.append(d)
+
+    # Propagate thought_signature to all function_call parts (Gemini 3 requirement)
+    if serialized:
+        first_sig = next((d["thought_signature"] for d in serialized if "thought_signature" in d), None)
+        if first_sig:
+            for d in serialized:
+                if "function_call" in d and "thought_signature" not in d:
+                    d["thought_signature"] = first_sig
+
     return serialized if serialized else None
 
 
@@ -622,6 +631,7 @@ class GeminiProvider(LLMProvider):
         self.model = config.gemini_model
         self._max_tokens = config.max_tokens
         self._temperature = config.temperature
+        self._thinking_level = config.gemini_thinking_level
 
     async def chat(
         self,
@@ -692,6 +702,13 @@ class GeminiProvider(LLMProvider):
             config_opts["system_instruction"] = system_instruction
         if tools:
             config_opts["tools"] = _to_gemini_tools(tools)
+        if self._thinking_level:
+            _budget_map = {"low": 1024, "medium": 8192, "high": 24576, "max": -1}
+            budget = _budget_map.get(self._thinking_level, 24576)
+            config_opts["thinking_config"] = types.ThinkingConfig(
+                thinking_budget=budget,
+                include_thoughts=True,
+            )
         gemini_config = types.GenerateContentConfig(**config_opts)
 
         if not on_chunk:
