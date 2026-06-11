@@ -935,8 +935,15 @@ async def run_agent_graph(
     timeout_s: float = 0,
     history: list[LLMMessage] | None = None,
     catalog: ToolCatalog | None = None,
+    cancel_event: asyncio.Event | None = None,
 ) -> AgentState:
-    """Single ReAct loop: LLM → tools → LLM → tools → ... → final answer."""
+    """Single ReAct loop: LLM → tools → LLM → tools → ... → final answer.
+
+    ``cancel_event`` lets the caller cancel an in-flight run externally
+    (checked at each round top and mid-stream by providers); when omitted,
+    an internal event is created (set by SIGINT only). A cancelled run ends
+    with ``status="done"`` and the partial result (or ``"[cancelled]"``).
+    """
     registry = tools or ToolRegistry()
     emit = on_event or _default_on_event
 
@@ -1029,7 +1036,7 @@ async def run_agent_graph(
     )
 
     overflow_retries = 0
-    cancel_event = asyncio.Event()
+    cancel_event = cancel_event or asyncio.Event()
     loop = asyncio.get_running_loop()
 
     def _on_sigint() -> None:

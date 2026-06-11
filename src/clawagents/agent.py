@@ -113,6 +113,7 @@ class ClawAgent:
         on_event: Optional[OnEvent] = None,
         timeout_s: float = 0,
         history: Optional[List[LLMMessage]] = None,
+        cancel_event: Optional[asyncio.Event] = None,
     ) -> AgentState:
         state = await run_agent_graph(
             task=task,
@@ -136,6 +137,7 @@ class ClawAgent:
             timeout_s=timeout_s,
             history=history,
             catalog=self.catalog,
+            cancel_event=cancel_event,
         )
         if state.ptrl_context is not None:
             self._ptrl_queue.append(state.ptrl_context)
