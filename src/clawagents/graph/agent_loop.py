@@ -1280,7 +1280,7 @@ async def run_agent_graph(
             if len(tool_calls) == 1:
                 call = tool_calls[0]
                 native_tc = native_tool_call_objects[0] if native_tool_call_objects else None
-                emit("tool_call", {"name": call.tool_name})
+                emit("tool_call", {"name": call.tool_name, "args": call.args})
 
                 if before_tool:
                     approved = False
@@ -1423,7 +1423,7 @@ async def run_agent_graph(
                         continue
 
                 for call in approved_calls:
-                    emit("tool_call", {"name": call.tool_name})
+                    emit("tool_call", {"name": call.tool_name, "args": call.args})
                 loop_tracker.record_batch(approved_calls)
 
                 results = await registry.execute_tools_parallel(approved_calls)
