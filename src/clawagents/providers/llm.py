@@ -2196,6 +2196,46 @@ def _gemini_part_from_block(part: Any) -> dict[str, Any] | None:
     return None
 
 
+def _split_tool_multimodal(content: Any) -> tuple[str, list[dict[str, Any]]]:
+    """Recover multimodal parts from a ``role="tool"`` message body.
+
+    The agent loop JSON-encodes list-typed (multimodal) tool outputs into the
+    tool message in native-tools mode, and Gemini's ``function_response`` can
+    only carry text — so a base64 image would reach the model as opaque text.
+    Detect such payloads and return ``(text_for_function_response, media_parts)``
+    so the caller can re-attach the media as ``inline_data`` in a follow-up
+    user turn. Anything that does not parse as a canonical content-block list
+    is returned unchanged with no media.
+    """
+    fallback = (content if isinstance(content, str) else str(content), [])
+    if isinstance(content, list):
+        blocks = content
+    elif isinstance(content, str) and content.lstrip().startswith("[") and '"type"' in content[:2000]:
+        try:
+            blocks = json.loads(content)
+        except (json.JSONDecodeError, ValueError):
+            return fallback
+        if not isinstance(blocks, list):
+            return fallback
+    else:
+        return fallback
+    texts: list[str] = []
+    media: list[dict[str, Any]] = []
+    for p in blocks:
+        if not isinstance(p, dict):
+            return fallback
+        ptype = p.get("type")
+        if ptype == "text":
+            texts.append(str(p.get("text", "") or ""))
+        elif ptype in ("image_url", "image", "file", "document"):
+            media.append(p)
+        else:
+            return fallback
+    if not media:
+        return fallback
+    return "\n".join(t for t in texts if t) or "[media attached below]", media
+
+
 class GeminiProvider(LLMProvider):
     name = "gemini"
 
@@ -2236,13 +2276,22 @@ class GeminiProvider(LLMProvider):
                     system_parts.extend([p.get("text", "") for p in m.content if p.get("type") == "text"])
             elif m.role == "tool" and m.tool_call_id:
                 tool_name = tc_id_to_name.get(m.tool_call_id, "unknown")
+                fr_text, fr_media = _split_tool_multimodal(m.content)
                 fr_body: dict[str, Any] = {
                     "name": tool_name,
-                    "response": {"result": m.content},
+                    "response": {"result": fr_text},
                     # Gemini 3 pairs FR to FC by id — must echo the call id.
                     "id": m.tool_call_id,
                 }
                 user_contents.append({"role": "user", "parts": [{"function_response": fr_body}]})
+                if fr_media:
+                    media_parts: list[dict[str, Any]] = [{"text": f"[Attachment(s) from tool {tool_name}]"}]
+                    for mp in fr_media:
+                        converted = _gemini_part_from_block(mp)
+                        if converted is not None:
+                            media_parts.append(converted)
+                    if len(media_parts) > 1:
+                        user_contents.append({"role": "user", "parts": media_parts})
             elif m.role == "assistant" and m.tool_calls_meta:
                 # Prefer preserved gemini_parts (thought_signature + FC ids).
                 user_contents.append({
