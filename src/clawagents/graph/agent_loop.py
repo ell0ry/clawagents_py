@@ -4229,7 +4229,9 @@ async def _run_agent_graph_core(
                 break
 
             if loop_tracker.is_soft_looping_batch(tool_calls):
-                loop_tracker.record_batch(tool_calls)
+                loop_tracker.record_batch(
+                    [c for c in tool_calls if not getattr(registry.tools.get(c.tool_name), "volatile", False)]
+                )
                 n = loop_tracker.bump_soft_warning()
                 repeated_calls = [
                     c for c in tool_calls
@@ -4416,7 +4418,11 @@ async def _run_agent_graph_core(
                             ))
                         continue
 
-                loop_tracker.record(call.tool_name, call.args)
+                # Volatile tools (sensors/actuators) are exempt from loop
+                # detection: a rotate->capture scan is legitimate robotic
+                # search, not a stuck loop — each call yields fresh data.
+                if not getattr(registry.tools.get(call.tool_name), "volatile", False):
+                    loop_tracker.record(call.tool_name, call.args)
 
                 # HITL tool approval (via RunContext). ``None`` means undecided,
                 # which we treat as approve-by-default for backward compatibility.
@@ -4927,7 +4933,9 @@ async def _run_agent_graph_core(
 
                 for call in approved_calls:
                     emit("tool_call", {"name": call.tool_name})
-                loop_tracker.record_batch(approved_calls)
+                loop_tracker.record_batch(
+                    [c for c in approved_calls if not getattr(registry.tools.get(c.tool_name), "volatile", False)]
+                )
 
                 for _c, _cid in zip(approved_calls, _approved_call_ids):
                     _emit_typed("tool_started", {
