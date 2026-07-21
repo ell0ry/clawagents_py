@@ -4519,7 +4519,13 @@ async def _run_agent_graph_core(
                 # Emit a periodic ``tool_heartbeat`` while the call is
                 # in flight so listeners can keep the channel alive and
                 # surface progress.
-                _reuse = loop_tracker.reuse_tool_output(call.tool_name, call.args)
+                # Volatile tools (sensors, actuators) may return new data or have
+                # fresh side effects on every call — never serve them a cached stub.
+                _tool_obj = registry.tools.get(call.tool_name) if registry is not None else None
+                if getattr(_tool_obj, "volatile", False):
+                    _reuse = None
+                else:
+                    _reuse = loop_tracker.reuse_tool_output(call.tool_name, call.args)
                 if _reuse is not None:
                     from clawagents.tools.registry import ToolResult as _TR
 
