@@ -2267,6 +2267,16 @@ class GeminiProvider(LLMProvider):
 
         system_parts: list[str] = []
         user_contents: list[dict[str, Any]] = []
+        # Media recovered from tool results is deferred until the current run of
+        # function_response messages ends: with PARALLEL function calls Gemini
+        # requires all FRs for a model turn to arrive consecutively — interleaving
+        # media contents between them is a 400 INVALID_ARGUMENT.
+        pending_media: list[dict[str, Any]] = []
+
+        def _flush_pending_media() -> None:
+            if pending_media:
+                user_contents.append({"role": "user", "parts": list(pending_media)})
+                pending_media.clear()
 
         for m in messages:
             if m.role == "system":
@@ -2291,8 +2301,9 @@ class GeminiProvider(LLMProvider):
                         if converted is not None:
                             media_parts.append(converted)
                     if len(media_parts) > 1:
-                        user_contents.append({"role": "user", "parts": media_parts})
+                        pending_media.extend(media_parts)
             elif m.role == "assistant" and m.tool_calls_meta:
+                _flush_pending_media()
                 # Prefer preserved gemini_parts (thought_signature + FC ids).
                 user_contents.append({
                     "role": "model",
@@ -2303,11 +2314,13 @@ class GeminiProvider(LLMProvider):
                     ),
                 })
             elif m.role == "assistant" and m.gemini_parts:
+                _flush_pending_media()
                 user_contents.append({
                     "role": "model",
                     "parts": _restore_gemini_parts_for_api(list(m.gemini_parts)),
                 })
             else:
+                _flush_pending_media()
                 role_name = "model" if m.role == "assistant" else "user"
                 if isinstance(m.content, str):
                     user_contents.append({"role": role_name, "parts": [{"text": m.content}]})
@@ -2319,6 +2332,7 @@ class GeminiProvider(LLMProvider):
                             parts2.append(converted)
                     if parts2:
                         user_contents.append({"role": role_name, "parts": parts2})
+        _flush_pending_media()
 
         user_contents = _sanitize_gemini_contents(user_contents)
 
