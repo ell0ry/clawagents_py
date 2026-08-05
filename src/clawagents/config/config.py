@@ -148,6 +148,8 @@ class EngineConfig(BaseSettings):
     openai_ssl_verify: bool = True
     gemini_api_key: str = ""
     gemini_model: str = "gemini-3-flash-preview"
+    # Gemini thinking budget preset (low|medium|high|max). Empty = provider default.
+    gemini_thinking_level: str = ""
     anthropic_api_key: str = ""
     anthropic_model: str = "claude-sonnet-4-5"
     # Optional Anthropic SDK base (e.g. Mantle ``…/anthropic``). Empty = api.anthropic.com.

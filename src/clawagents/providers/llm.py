@@ -2246,6 +2246,7 @@ class GeminiProvider(LLMProvider):
         self.model = config.gemini_model
         self._max_tokens = config.max_tokens
         self._temperature = config.temperature
+        self._thinking_level = config.gemini_thinking_level
 
     async def chat(
         self,
@@ -2348,6 +2349,12 @@ class GeminiProvider(LLMProvider):
             config_opts["system_instruction"] = system_instruction
         if tools:
             config_opts["tools"] = _to_gemini_tools(tools)
+        if self._thinking_level:
+            _budget_map = {"low": 1024, "medium": 8192, "high": 24576, "max": -1}
+            config_opts["thinking_config"] = types.ThinkingConfig(
+                thinking_budget=_budget_map.get(self._thinking_level, 24576),
+                include_thoughts=True,
+            )
         schema = getattr(self, "_structured_json_schema", None)
         if isinstance(schema, dict) and schema and not tools:
             try:
@@ -2438,7 +2445,7 @@ class GeminiProvider(LLMProvider):
         if not _malformed_retry and "MALFORMED_FUNCTION_CALL" in fr_str and not fn_calls:
             logger.warning("  [gemini] MALFORMED_FUNCTION_CALL detected — retrying with mode=ANY")
             retry_opts: dict[str, Any] = {}
-            for attr in ("max_output_tokens", "temperature", "system_instruction", "tools"):
+            for attr in ("max_output_tokens", "temperature", "system_instruction", "tools", "thinking_config"):
                 val = getattr(gemini_config, attr, None)
                 if val is not None:
                     retry_opts[attr] = val
@@ -2586,7 +2593,7 @@ class GeminiProvider(LLMProvider):
                 if "MALFORMED_FUNCTION_CALL" in fr_str and not fn_calls:
                     logger.warning("  [gemini] MALFORMED_FUNCTION_CALL in stream — retrying with mode=ANY (non-stream)")
                     retry_opts: dict[str, Any] = {}
-                    for attr in ("max_output_tokens", "temperature", "system_instruction", "tools"):
+                    for attr in ("max_output_tokens", "temperature", "system_instruction", "tools", "thinking_config"):
                         val = getattr(gemini_config, attr, None)
                         if val is not None:
                             retry_opts[attr] = val
