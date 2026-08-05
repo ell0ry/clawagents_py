@@ -2477,6 +2477,8 @@ async def run_agent_graph(
     image_blocks: Optional[list[dict]] = None,
     file_blocks: Optional[list[dict]] = None,
     session_end_tail: bool = True,
+    cancel_event: Optional[asyncio.Event] = None,
+    history: Optional[list[LLMMessage]] = None,
 ) -> AgentState:
     """Single ReAct loop: LLM → tools → LLM → tools → ... → final answer."""
     if features is not None:
@@ -2524,6 +2526,8 @@ async def run_agent_graph(
                 image_blocks=image_blocks,
                 file_blocks=file_blocks,
                 session_end_tail=session_end_tail,
+                cancel_event=cancel_event,
+                history=history,
             )
     return await _run_agent_graph_core(
         task=task,
@@ -2566,6 +2570,8 @@ async def run_agent_graph(
         image_blocks=image_blocks,
         file_blocks=file_blocks,
         session_end_tail=session_end_tail,
+        cancel_event=cancel_event,
+        history=history,
     )
 
 
@@ -2612,6 +2618,8 @@ async def _run_agent_graph_core(
     image_blocks: Optional[list[dict]] = None,
     file_blocks: Optional[list[dict]] = None,
     session_end_tail: bool = True,
+    cancel_event: Optional[asyncio.Event] = None,
+    history: Optional[list[LLMMessage]] = None,
 ) -> AgentState:
     """Internal ReAct loop body (feature overrides applied by :func:`run_agent_graph`)."""
     registry = tools or ToolRegistry()
@@ -3244,6 +3252,21 @@ async def _run_agent_graph_core(
                 _session_preloaded_count = len(prior)
         except Exception as err:
             emit("warn", {"message": f"session load failed: {err}"})
+    # Caller-supplied transcript preload (server-managed conversations): the
+    # caller owns durable history (e.g. a DB summary + tail) and replays it
+    # here, sanitized exactly like a session preload so a summary+tail cut
+    # can't produce orphan-tool 400s. Inserted immediately before the current
+    # task message; composes with ``session=`` (session prior lands earlier).
+    if history:
+        _hist = _drop_leading_orphan_tools(list(history))
+        _hist = _patch_dangling_tool_calls(_hist)
+        if _hist:
+            _ins = next(
+                (i for i, m in enumerate(messages) if m is _session_task_msg),
+                len(messages),
+            )
+            messages = [*messages[:_ins], *_hist, *messages[_ins:]]
+            state.messages = messages
     # Identity-based tracking of preloaded vs. run-appended messages.
     # A numeric cursor breaks when compaction rebuilds ``messages`` or
     # dangling-tool-call patching inserts items mid-list, silently losing
@@ -3313,7 +3336,9 @@ async def _run_agent_graph_core(
     # Set when a handoff installs the combined parent+child transcript on
     # ``state.messages`` — the post-loop assignment must not overwrite it.
     _handoff_transcript_set = False
-    cancel_event = asyncio.Event()
+    # Caller-owned cancel event (e.g. a server's barge-in); falls back to an
+    # internal one fed only by the SIGINT handler below.
+    cancel_event = cancel_event or asyncio.Event()
     loop = asyncio.get_running_loop()
 
     def _on_sigint() -> None:

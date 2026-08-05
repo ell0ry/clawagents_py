@@ -7,7 +7,7 @@ import warnings
 from pathlib import Path
 from typing import Callable, Optional, List, Dict, Any, Union
 
-from clawagents.providers.llm import LLMProvider
+from clawagents.providers.llm import LLMMessage, LLMProvider
 from clawagents.tools.registry import ToolRegistry, Tool, ToolResult
 from clawagents.graph.agent_loop import (
     run_agent_graph, AgentState, OnEvent,
@@ -196,8 +196,21 @@ class ClawAgent:
         images: Optional[list[dict]] = None,
         files: Optional[list[dict]] = None,
         session_end_tail: bool = True,
+        cancel_event: Optional[asyncio.Event] = None,
+        history: Optional[List[LLMMessage]] = None,
     ) -> AgentState:
         """Start the ReAct agent loop for ``task``.
+
+        ``history`` replays a caller-owned transcript (e.g. a DB-backed
+        summary + tail) between the system prompt and this task's user
+        message. It is sanitized like a session preload (orphan tool pairs
+        dropped/patched) and is never re-persisted. Use ``history`` OR
+        ``session`` — a server that owns its transcript wants ``history``.
+
+        ``cancel_event`` lets the caller cancel an in-flight run externally
+        (checked at each round top and mid-stream by providers); when omitted,
+        an internal event is created (set by SIGINT only). A cancelled run
+        ends with ``status="done"`` and the partial result (``"[cancelled]"``).
 
         All per-call keyword arguments (``hooks``, ``input_guardrails``,
         ``output_type``, ``session``, ``on_stream_event`` …) override the
@@ -331,6 +344,8 @@ class ClawAgent:
             image_blocks=image_blocks,
             file_blocks=file_blocks,
             session_end_tail=session_end_tail,
+            cancel_event=cancel_event,
+            history=history,
         )
 
     # ── Convenience hook methods ──────────────────────────────────────
