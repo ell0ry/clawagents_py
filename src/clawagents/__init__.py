@@ -15,7 +15,7 @@ from clawagents.graph.coordinator import (
     run_coordinator,
 )
 from clawagents.trajectory import (
-    TrajectoryRecorder, TurnRecord, RunSummary,
+    TrajectoryRecorder, TurnRecord, RunSummary, PTRLContext,
     extract_lessons, save_lessons, load_lessons,
     build_lesson_preamble, build_rethink_with_lessons,
 )

@@ -2,12 +2,14 @@ import os
 import re
 import asyncio
 import difflib
+import logging
 import unicodedata
 import warnings
 from pathlib import Path
 from typing import Callable, Optional, List, Dict, Any, Union
 
 from clawagents.providers.llm import LLMMessage, LLMProvider
+from clawagents.trajectory.recorder import PTRLContext
 from clawagents.tools.registry import ToolRegistry, Tool, ToolResult
 from clawagents.graph.agent_loop import (
     run_agent_graph, AgentState, OnEvent,
@@ -18,6 +20,8 @@ from clawagents.lifecycle import RunHooks, AgentHooks
 from clawagents.guardrails import InputGuardrail, OutputGuardrail
 from clawagents.stream_events import StreamEvent
 from clawagents.handoffs import Handoff
+
+logger = logging.getLogger(__name__)
 
 
 class LangChainToolAdapter:
@@ -82,6 +86,7 @@ class ClawAgent:
         trajectory: bool = False,
         rethink: bool = False,
         learn: bool = False,
+        learn_mode: str = "",
         atlas: bool = False,
         atlas_config: Optional[Any] = None,
         max_iterations: int = 200,
@@ -148,6 +153,10 @@ class ClawAgent:
         self.trajectory = trajectory
         self.rethink = rethink
         self.learn = learn
+        # "" | "blocking" | "deferred" — deferred queues PTRL context per run
+        # for a batched ClawAgent.reflect() instead of inline judge+lessons.
+        self.learn_mode = learn_mode
+        self._ptrl_queue: List[PTRLContext] = []
         self.atlas = False  # ATLAS removed
         self.atlas_config = None
         self.max_iterations = max_iterations
@@ -292,7 +301,7 @@ class ClawAgent:
             and getattr(self, "_chat_mode", None) == "full_access"
         )
 
-        return await run_agent_graph(
+        state = await run_agent_graph(
             task=task,
             llm=self.llm,
             tools=self.tools,
@@ -308,6 +317,7 @@ class ClawAgent:
             trajectory=self.trajectory,
             rethink=self.rethink,
             learn=self.learn,
+            learn_mode=self.learn_mode,
             atlas=self.atlas,
             atlas_config=self.atlas_config,
             preview_chars=self.preview_chars,
@@ -347,6 +357,9 @@ class ClawAgent:
             cancel_event=cancel_event,
             history=history,
         )
+        if state.ptrl_context is not None:
+            self._ptrl_queue.append(state.ptrl_context)
+        return state
 
     # ── Convenience hook methods ──────────────────────────────────────
 
@@ -425,6 +438,78 @@ class ClawAgent:
             return [*messages, LLMMessage(role="user", content=marker)]
 
         self.before_llm = hook
+
+    # ── Deferred PTRL ──────────────────────────────────────────────
+
+    @property
+    def pending_reflections(self) -> int:
+        """Number of runs queued for deferred PTRL processing."""
+        return len(self._ptrl_queue)
+
+    def clear_ptrl_queue(self) -> int:
+        """Discard pending PTRL data without processing. Returns count discarded."""
+        count = len(self._ptrl_queue)
+        self._ptrl_queue.clear()
+        return count
+
+    async def reflect(self) -> Dict[str, Any]:
+        """Run deferred PTRL (judge + lesson extraction) on accumulated runs.
+
+        Merges all queued contexts into a single conversation-level context,
+        then runs one judge call and one lesson extraction call.
+        Returns a summary dict.  Safe to call when the queue is empty.
+        """
+        if not self._ptrl_queue:
+            return {"runs_processed": 0, "judge_scores": [], "lessons_extracted": 0}
+
+        from clawagents.trajectory.judge import judge_run
+        from clawagents.trajectory.lessons import (
+            extract_lessons, save_lessons, should_extract_lessons,
+        )
+
+        queue = self._ptrl_queue[:]
+        self._ptrl_queue.clear()
+
+        # Merge all contexts from this conversation into one
+        merged = PTRLContext.merge(queue)
+
+        judge_scores: list[int | None] = []
+        lessons_extracted = 0
+
+        # Single judge call for the entire conversation
+        try:
+            judge_result = await judge_run(
+                self.llm, merged.task, merged.summary_dict,
+                merged.result, merged.turn_dicts,
+            )
+            judge_result.pop("_llm_response", None)
+            judge_scores.append(judge_result.get("judge_score"))
+        except Exception:
+            logger.debug("Deferred judge failed", exc_info=True)
+            judge_scores.append(None)
+
+        # Single lesson extraction for the entire conversation
+        try:
+            if should_extract_lessons(merged.summary_dict):
+                lessons_text = await extract_lessons(
+                    self.llm, merged.summary_dict, merged.turn_dicts,
+                )
+                if lessons_text:
+                    save_lessons(
+                        lessons_text,
+                        merged.summary_dict.get("task", ""),
+                        merged.summary_dict.get("outcome", ""),
+                        model=merged.model,
+                    )
+                    lessons_extracted += 1
+        except Exception:
+            logger.debug("Deferred lesson extraction failed", exc_info=True)
+
+        return {
+            "runs_processed": len(queue),
+            "judge_scores": judge_scores,
+            "lessons_extracted": lessons_extracted,
+        }
 
     async def compare(
         self,
@@ -655,6 +740,7 @@ def create_claw_agent(
     trajectory: Optional[bool] = None,
     rethink: Optional[bool] = None,
     learn: Optional[bool] = None,
+    learn_mode: Optional[str] = None,
     atlas: Optional[bool] = None,
     atlas_config: Optional[Any] = None,
     max_iterations: Optional[int] = None,
@@ -815,6 +901,10 @@ def create_claw_agent(
         rethink = os.environ.get("CLAW_RETHINK", "").lower() in ("1", "true", "yes")
     if learn is None:
         learn = os.environ.get("CLAW_LEARN", "").lower() in ("1", "true", "yes")
+    if learn_mode is None:
+        learn_mode = os.environ.get("CLAW_LEARN_MODE", "")
+    if learn_mode == "deferred":
+        learn = True
     # ATLAS removed (6.16+): kwargs / CLAW_ATLAS are ignored.
     if atlas or atlas_config or os.environ.get("CLAW_ATLAS", "").lower() in ("1", "true", "yes"):
         warnings.warn(
@@ -1244,7 +1334,7 @@ def create_claw_agent(
         streaming=streaming, use_native_tools=use_native_tools,
         context_window=context_window, on_event=on_event,
         before_llm=composed_before_llm, trajectory=trajectory,
-        rethink=rethink, learn=learn, atlas=False,
+        rethink=rethink, learn=learn, learn_mode=learn_mode or "", atlas=False,
         atlas_config=None, max_iterations=max_iterations,
         preview_chars=preview_chars, response_chars=response_chars,
         features=features,

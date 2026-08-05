@@ -537,6 +537,9 @@ class AgentState:
     run_context: RunContext = field(default_factory=RunContext)
     final_output: Any = None
     guardrail_triggered: Optional[str] = None
+    # Deferred PTRL capture (learn_mode="deferred"); consumed by
+    # ClawAgent.reflect().
+    ptrl_context: "PTRLContext | None" = None
 
 
 BASE_SYSTEM_PROMPT = """You are a ClawAgent, an AI assistant that helps users accomplish tasks using tools. You respond with text and tool calls.
@@ -708,6 +711,7 @@ def _truncate_old_tool_args(
 
 if TYPE_CHECKING:
     from clawagents.loop_detection import LoopDetectionConfig
+    from clawagents.trajectory.recorder import PTRLContext
 
 
 class _ToolCallTracker:
@@ -2479,6 +2483,7 @@ async def run_agent_graph(
     session_end_tail: bool = True,
     cancel_event: Optional[asyncio.Event] = None,
     history: Optional[list[LLMMessage]] = None,
+    learn_mode: str = "",
 ) -> AgentState:
     """Single ReAct loop: LLM → tools → LLM → tools → ... → final answer."""
     if features is not None:
@@ -2528,6 +2533,7 @@ async def run_agent_graph(
                 session_end_tail=session_end_tail,
                 cancel_event=cancel_event,
                 history=history,
+                learn_mode=learn_mode,
             )
     return await _run_agent_graph_core(
         task=task,
@@ -2572,6 +2578,7 @@ async def run_agent_graph(
         session_end_tail=session_end_tail,
         cancel_event=cancel_event,
         history=history,
+        learn_mode=learn_mode,
     )
 
 
@@ -2620,6 +2627,7 @@ async def _run_agent_graph_core(
     session_end_tail: bool = True,
     cancel_event: Optional[asyncio.Event] = None,
     history: Optional[list[LLMMessage]] = None,
+    learn_mode: str = "",
 ) -> AgentState:
     """Internal ReAct loop body (feature overrides applied by :func:`run_agent_graph`)."""
     registry = tools or ToolRegistry()
@@ -2827,6 +2835,14 @@ async def _run_agent_graph_core(
     # controls optional advisor/learning behavior, not basic loop safety.
     failure_tracker = _FailureTracker(threshold=adaptive_threshold)
     _compaction_savings: list[float] = []
+
+    # ── Resolve learn_mode ── ("deferred" captures PTRL context on the state
+    # for a later ClawAgent.reflect() instead of judging/extracting inline).
+    if not learn_mode:
+        learn_mode = "blocking" if learn else "off"
+    elif learn_mode == "deferred":
+        learn = True
+        trajectory = True
 
     # Trajectory recorder (opt-in; learn implies trajectory)
     recorder = None
@@ -5339,8 +5355,23 @@ async def _run_agent_graph_core(
         emit("context", {"message": f"trajectory saved to {run_summary.trajectory_file}"})
 
 
+    # ── Deferred PTRL: capture context for later ClawAgent.reflect() ──
+    # (judge + lesson extraction are skipped inline; the caller batches them
+    # once per conversation instead of once per invoke).
+    if learn_mode == "deferred" and recorder and run_summary:
+        from dataclasses import asdict
+        from clawagents.trajectory.recorder import PTRLContext
+
+        state.ptrl_context = PTRLContext(
+            task=task,
+            result=state.result or "",
+            summary_dict=asdict(run_summary),
+            turn_dicts=[asdict(t) for t in recorder.turns],
+            model=run_summary.model,
+        )
+
     # ── Feature G: LLM-as-Judge verification ──
-    if learn and recorder and run_summary:
+    if learn_mode != "deferred" and learn and recorder and run_summary:
         try:
             from dataclasses import asdict
             from clawagents.trajectory.judge import judge_run
@@ -5369,7 +5400,8 @@ async def _run_agent_graph_core(
     # Skipped for isolated subagents (skip_memory=True): subagents must not
     # write lessons back into the parent's lesson store.
     if (
-        learn
+        learn_mode != "deferred"
+        and learn
         and recorder
         and run_summary
         and not getattr(run_context, "skip_memory", False)
