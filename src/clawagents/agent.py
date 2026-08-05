@@ -6,7 +6,10 @@ import logging
 import unicodedata
 import warnings
 from pathlib import Path
-from typing import Callable, Optional, List, Dict, Any, Union
+from typing import TYPE_CHECKING, Callable, Optional, List, Dict, Any, Union
+
+if TYPE_CHECKING:
+    from clawagents.tools.waterfall_catalog import ToolCatalog
 
 from clawagents.providers.llm import LLMMessage, LLMProvider
 from clawagents.trajectory.recorder import PTRLContext
@@ -111,6 +114,7 @@ class ClawAgent:
         action_mode: str = "tools",
         approval_handler: Any = None,
         require_approval_tools: Optional[List[str]] = None,
+        catalog: Optional["ToolCatalog"] = None,
     ):
         """
         Initialize a ClawAgent.
@@ -181,6 +185,9 @@ class ClawAgent:
         self.action_mode = action_mode if action_mode in ("tools", "code") else "tools"
         self.approval_handler = approval_handler
         self.require_approval_tools = list(require_approval_tools or [])
+        # Waterfall catalog (clawagents.tools.waterfall_catalog.ToolCatalog):
+        # drives the registry's active-tools set; invoke() keyword-preloads it.
+        self.catalog = catalog
         self.goal_mode = False
 
     async def invoke(
@@ -235,6 +242,15 @@ class ClawAgent:
         "name": "report.pdf"}``. PDFs reach the model natively; DOCX is
         text-extracted; anything else degrades to a short text note.
         """
+        # Waterfall catalog: keyword-preload matching categories before the
+        # run so their schemas ride the first LLM call (the loop rebuilds
+        # native schemas from the registry's active set every round).
+        if getattr(self, "catalog", None) is not None:
+            try:
+                self.catalog.preload_from_query(task)
+            except Exception:
+                logger.debug("catalog preload failed", exc_info=True)
+
         image_blocks: Optional[list[dict]] = None
         if images:
             from clawagents.media.images import build_user_image_block
@@ -764,6 +780,7 @@ def create_claw_agent(
     goal_mode: bool = False,
     features: Optional[dict[str, bool]] = None,
     workspace: Optional[Union[str, os.PathLike]] = None,
+    catalog: Optional["ToolCatalog"] = None,
 ) -> ClawAgent:
     """
     Create a ClawAgent with full-stack capabilities.
@@ -1344,6 +1361,7 @@ def create_claw_agent(
         action_mode=action_mode_norm,
         approval_handler=approval_handler,
         require_approval_tools=require_approval_tools,
+        catalog=catalog,
     )
     agent.goal_mode = bool(goal_mode)
     if skill_store is not None:

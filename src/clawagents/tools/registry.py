@@ -632,14 +632,14 @@ class ToolRegistry:
             and tool_name not in self._active_tools
             and tool_name != "activate_tool_group"
         ):
+            _hint = getattr(self, "_inactive_tool_hint", None) or (
+                "Call activate_tool_group(group=…) to unlock its group, "
+                "or activate_tool_group(group='list') to see options."
+            )
             return ToolResult(
                 success=False,
                 output="",
-                error=(
-                    f"Tool '{tool_name}' is registered but not active. "
-                    "Call activate_tool_group(group=…) to unlock its group, "
-                    "or activate_tool_group(group='list') to see options."
-                ),
+                error=f"Tool '{tool_name}' is registered but not active. {_hint}",
             )
 
         def _skill_key(value: object) -> str:
