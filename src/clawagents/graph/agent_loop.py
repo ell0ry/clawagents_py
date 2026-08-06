@@ -3043,15 +3043,20 @@ async def _run_agent_graph_core(
     # Dynamic context packs (after cache boundary) — local only.
     if not getattr(run_context, "skip_memory", False):
         from clawagents.config.features import is_enabled
+        # Honour the run's workspace. These loaders all accept ``workspace=``
+        # and fall back to ``Path.cwd()``; without it a host that sets
+        # ``workspace=`` (a server whose CWD is not the workspace) reads and
+        # writes its memory in one directory and everything else in another.
+        _ws = _run_context_workspace(run_context)
         try:
             if is_enabled("core_memory"):
                 from clawagents.memory.core_memory import load_core_memory
-                cm = load_core_memory()
+                cm = load_core_memory(workspace=_ws)
                 if cm:
                     dynamic_parts.append(cm)
             if is_enabled("context_ledger"):
                 from clawagents.memory.context_ledger import load_ledger_preamble
-                led = load_ledger_preamble()
+                led = load_ledger_preamble(workspace=_ws)
                 if led:
                     dynamic_parts.append(led)
             if is_enabled("memory_bank"):
@@ -3059,13 +3064,13 @@ async def _run_agent_graph_core(
                     ensure_memory_bank_stubs,
                     load_memory_bank_preamble,
                 )
-                ensure_memory_bank_stubs()
-                mb = load_memory_bank_preamble()
+                ensure_memory_bank_stubs(_ws)
+                mb = load_memory_bank_preamble(workspace=_ws)
                 if mb:
                     dynamic_parts.append(mb)
             if is_enabled("fact_store"):
                 from clawagents.memory.facts import live_facts_preamble
-                facts = live_facts_preamble()
+                facts = live_facts_preamble(workspace=_ws)
                 if facts:
                     dynamic_parts.append(facts)
             from clawagents.tools.context_tools import load_plan_preamble
