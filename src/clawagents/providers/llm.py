@@ -1110,23 +1110,82 @@ def _sanitize_openai_tool_pairs(formatted: list[dict[str, Any]]) -> list[dict[st
     return final
 
 
+def _openai_part_from_block(part: dict[str, Any]) -> dict[str, Any] | None:
+    """Content block → Chat Completions user-content part, or None.
+
+    Only image shapes convert: ``image_url`` parts pass through, Anthropic-style
+    ``image`` blocks become data-URL ``image_url`` parts. ``file``/``document``
+    have no Chat Completions user-part encoding here — callers substitute a
+    text placeholder so the model knows something was omitted.
+    """
+    ptype = part.get("type")
+    if ptype == "image_url":
+        url = (part.get("image_url") or {}).get("url")
+        if isinstance(url, str) and url:
+            return {"type": "image_url", "image_url": {"url": url}}
+        return None
+    if ptype == "image":
+        source = part.get("source") or {}
+        if source.get("type") == "base64" and source.get("data"):
+            mime = source.get("media_type") or "image/png"
+            return {
+                "type": "image_url",
+                "image_url": {"url": f"data:{mime};base64,{source['data']}"},
+            }
+        if source.get("type") == "url" and source.get("url"):
+            return {"type": "image_url", "image_url": {"url": source["url"]}}
+    return None
+
+
 def _openai_chat_messages(messages: list[LLMMessage]) -> list[dict[str, Any]]:
     """Format LLMMessages for the OpenAI wire (Chat Completions directly;
     the Responses path converts further via ``_messages_to_responses_input``).
 
     Multimodal user content — the canonical ``text`` / ``image_url`` /
     ``file`` parts — passes through verbatim: Chat Completions accepts those
-    shapes natively. The ``__CACHE_BOUNDARY__`` marker is an Anthropic-only
-    prompt-cache hint; strip it here so OpenAI never receives the stray
-    internal token at the tail of its system prompt.
+    shapes natively. Multimodal TOOL output (the agent loop JSON-encodes list
+    results into the ``role="tool"`` string in native-tools mode) is recovered
+    via ``_split_tool_multimodal``: text stays in the tool message, media rides
+    a follow-up user turn. The user turn is deferred until the current run of
+    tool messages ends — with parallel function calls every result must
+    directly follow its assistant turn (same approach as the Gemini provider).
+    The ``__CACHE_BOUNDARY__`` marker is an Anthropic-only prompt-cache hint;
+    strip it here so OpenAI never receives the stray internal token at the
+    tail of its system prompt.
     """
     formatted: list[dict[str, Any]] = []
+    pending_media: list[dict[str, Any]] = []
+
+    def _flush_media() -> None:
+        if pending_media:
+            formatted.append({"role": "user", "content": list(pending_media)})
+            pending_media.clear()
+
     for m in messages:
         if m.role == "tool" and m.tool_call_id:
+            text, media = _split_tool_multimodal(m.content)
+            # No media → pass the original content through untouched (the
+            # fallback str is only a repr for exotic non-string bodies).
+            content_out = text if media else m.content
             formatted.append(
-                {"role": "tool", "tool_call_id": m.tool_call_id, "content": m.content}
+                {"role": "tool", "tool_call_id": m.tool_call_id, "content": content_out}
             )
+            if media:
+                pending_media.append(
+                    {
+                        "type": "text",
+                        "text": f"[Attachment(s) from tool call {m.tool_call_id}]",
+                    }
+                )
+                for p in media:
+                    blk = _openai_part_from_block(p)
+                    pending_media.append(
+                        blk
+                        if blk is not None
+                        else {"type": "text", "text": "[unsupported attachment omitted]"}
+                    )
         elif m.role == "assistant" and m.tool_calls_meta:
+            _flush_media()
             formatted.append({
                 "role": "assistant",
                 "content": m.content or None,
@@ -1136,10 +1195,12 @@ def _openai_chat_messages(messages: list[LLMMessage]) -> list[dict[str, Any]]:
                 ],
             })
         else:
+            _flush_media()
             content = m.content
             if isinstance(content, str) and "__CACHE_BOUNDARY__" in content:
                 content = content.replace("__CACHE_BOUNDARY__", "").strip()
             formatted.append({"role": m.role, "content": content})
+    _flush_media()
     return formatted
 
 
@@ -2779,6 +2840,11 @@ class AnthropicProvider(LLMProvider):
             if m.role == "system":
                 system_parts.append(m.content if isinstance(m.content, str) else str(m.content))
             elif m.role == "tool" and m.tool_call_id:
+                # NOTE: multimodal tool output (JSON-encoded block lists) is
+                # not recovered here — see ``_split_tool_multimodal`` and the
+                # OpenAI/Gemini providers. Anthropic tool_result accepts image
+                # blocks natively, so the fix differs in shape; deferred until
+                # a consumer routes multimodal tools through this provider.
                 block = {"type": "tool_result", "tool_use_id": m.tool_call_id, "content": m.content}
                 # Coalesce consecutive tool results into ONE user message —
                 # Anthropic requires every tool_result block answering a single
