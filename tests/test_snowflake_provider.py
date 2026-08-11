@@ -279,3 +279,70 @@ def test_parallel_tool_calls_split_on_replay():
         # Original text content stays on the first split message only.
         assert sent[1]["content"] == "checking both"
         assert sent[3]["content"] is None
+
+
+# ── streaming: parallel tool calls that share an index ───────────────────────
+
+
+class _FnDelta:
+    def __init__(self, name: str = "", arguments: str = ""):
+        self.name = name
+        self.arguments = arguments
+
+
+class _TcDelta:
+    def __init__(self, index, tc_id="", name="", arguments=""):
+        self.index = index
+        self.id = tc_id
+        self.function = _FnDelta(name, arguments)
+
+
+def _accumulate(deltas):
+    """Drive the SHIPPED accumulator, not a copy of it."""
+    from clawagents.providers.llm import accumulate_tool_call_delta
+
+    tools: dict[int, dict] = {}
+    slot_of_id: dict[str, int] = {}
+    slot_of_index: dict[int, int] = {}
+    for tc in deltas:
+        accumulate_tool_call_delta(tools, slot_of_id, slot_of_index, tc)
+    return [tools[k] for k in sorted(tools)]
+
+
+def test_cortex_parallel_tool_calls_share_index_zero():
+    """Captured verbatim from a live Cortex stream (2026-08-11).
+
+    Cortex numbers every parallel call index=0 and separates them only by id.
+    Keying on index concatenated both names into "move_windowfocus_window" and
+    glued two JSON objects together — the agent then looped on a tool that does
+    not exist until it hit its round cap.
+    """
+    deltas = [
+        _TcDelta(0, "toolu_bdrk_014Z", "move_window"),
+        _TcDelta(0, "", "", '{"window_'),
+        _TcDelta(0, "", "", 'id": "abc123", "'),
+        _TcDelta(0, "", "", 'device": "kitchen"}'),
+        _TcDelta(0, "toolu_bdrk_01Q1", "focus_window"),
+        _TcDelta(0, "", "", '{"wi'),
+        _TcDelta(0, "", "", 'ndow_id": "abc123"}'),
+    ]
+    calls = _accumulate(deltas)
+    assert [c["name"] for c in calls] == ["move_window", "focus_window"]
+    assert calls[0]["arguments"] == '{"window_id": "abc123", "device": "kitchen"}'
+    assert calls[1]["arguments"] == '{"window_id": "abc123"}'
+
+
+def test_openai_style_distinct_indexes_still_route_by_index():
+    """The OpenAI contract must keep working: interleaved argument deltas."""
+    deltas = [
+        _TcDelta(0, "call_a", "get_weather"),
+        _TcDelta(1, "call_b", "get_forecast"),
+        _TcDelta(0, "", "", '{"city":'),
+        _TcDelta(1, "", "", '{"days":'),
+        _TcDelta(0, "", "", ' "Houston"}'),
+        _TcDelta(1, "", "", " 3}"),
+    ]
+    calls = _accumulate(deltas)
+    assert [c["name"] for c in calls] == ["get_weather", "get_forecast"]
+    assert calls[0]["arguments"] == '{"city": "Houston"}'
+    assert calls[1]["arguments"] == '{"days": 3}'

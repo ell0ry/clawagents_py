@@ -603,6 +603,44 @@ def _fire_first_token(cb: Any) -> None:
         pass
 
 
+def accumulate_tool_call_delta(
+    tools: dict[int, dict[str, Any]],
+    slot_of_id: dict[str, int],
+    slot_of_index: dict[int, int],
+    tc: Any,
+) -> None:
+    """Fold one streamed tool-call delta into its slot, in place.
+
+    Not every OpenAI-compatible provider numbers parallel tool calls. Snowflake
+    Cortex sends ``index=0`` for EVERY call in a batch and separates them only
+    by ``id``, so keying purely on index concatenated their names
+    (``"move_window"`` + ``"focus_window"``) and glued their argument JSON
+    together. A new id therefore always opens a new slot; deltas without an id
+    are continuations and route by index, which for id-less providers resolves
+    to the slot most recently opened there.
+    """
+    idx = tc.index if getattr(tc, "index", None) is not None else 0
+    tc_id = getattr(tc, "id", None) or ""
+    if tc_id:
+        if tc_id not in slot_of_id:
+            slot_of_id[tc_id] = len(tools)
+        slot = slot_of_id[tc_id]
+        slot_of_index[idx] = slot
+    else:
+        slot = slot_of_index.get(idx, idx)
+    if slot not in tools:
+        tools[slot] = {"id": "", "name": "", "arguments": ""}
+        slot_of_index.setdefault(idx, slot)
+    if tc_id:
+        tools[slot]["id"] = tc_id
+    fn = getattr(tc, "function", None)
+    if fn is not None:
+        if fn.name:
+            tools[slot]["name"] += fn.name
+        if fn.arguments:
+            tools[slot]["arguments"] += fn.arguments
+
+
 def _openai_cached_tokens(usage: Any) -> int:
     """Read prompt-cache hits from an OpenAI usage object, defaulting to 0.
 
@@ -1771,6 +1809,14 @@ class OpenAIProvider(LLMProvider):
             final_prompt_tokens = 0
             final_cached_tokens = 0
             tools_accumulation: dict[int, dict[str, Any]] = {}
+            # Slot bookkeeping for providers that do NOT number parallel tool
+            # calls. Snowflake Cortex sends index=0 for EVERY call in a batch
+            # and distinguishes them only by id; keying purely on index
+            # concatenated their names ("move_window" + "focus_window" =
+            # "move_windowfocus_window") and their argument JSON. Prefer the
+            # id when one arrives, fall back to index for continuation deltas.
+            _slot_of_id: dict[str, int] = {}
+            _slot_of_index: dict[int, int] = {}
 
             def _accumulated_calls() -> list[NativeToolCall] | None:
                 if not tools_accumulation:
@@ -1842,16 +1888,9 @@ class OpenAIProvider(LLMProvider):
                                     first_token_fired = True
                                     _fire_first_token(on_first_token)
                                 for tc in delta.tool_calls:
-                                    idx = tc.index
-                                    if idx not in tools_accumulation:
-                                        tools_accumulation[idx] = {"id": "", "name": "", "arguments": ""}
-                                    if getattr(tc, "id", None):
-                                        tools_accumulation[idx]["id"] = tc.id
-                                    if getattr(tc, "function", None):
-                                        if tc.function.name:
-                                            tools_accumulation[idx]["name"] += tc.function.name
-                                        if tc.function.arguments:
-                                            tools_accumulation[idx]["arguments"] += tc.function.arguments
+                                    accumulate_tool_call_delta(
+                                        tools_accumulation, _slot_of_id, _slot_of_index, tc
+                                    )
 
                         if chunk.usage:
                             final_tokens = chunk.usage.total_tokens
