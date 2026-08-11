@@ -1574,6 +1574,13 @@ def _resolve_model(
         provider_hint=provider,
     )
 
+    # Snowflake Cortex resolves its endpoint from ``snowflake_base_url``, not
+    # ``openai_base_url``. A caller that passes an explicit ``base_url`` (Ada
+    # carries one per registry entry, in place of SNOWFLAKE_ACCOUNT) must reach
+    # that field or the provider raises "Cortex endpoint unknown".
+    if kind == "snowflake" and base_url is not None:
+        config.snowflake_base_url = base_url
+
     # Override the appropriate API key if provided — driven by the classifier
     # (and optional profile provider hint), not ad-hoc startswith checks.
     if api_key:
@@ -1584,6 +1591,8 @@ def _resolve_model(
             config.anthropic_api_key = api_key
         elif field == "openai_api_key":
             config.openai_api_key = api_key
+        elif field == "snowflake_api_key":
+            config.snowflake_api_key = api_key
         # field is None → native Bedrock IAM; leave key fields alone.
 
     # Strip litellm ``provider/`` before the factory (SDK must not see it).

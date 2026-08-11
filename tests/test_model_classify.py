@@ -87,3 +87,37 @@ def test_resolve_model_routes_key_via_profile_hint(monkeypatch):
     assert captured["anthropic_api_key"] == "sk-ant-secret"
     assert not str(captured["openai_api_key"] or "").startswith("sk-ant")
     assert captured["hint"] == "anthropic"
+
+
+def test_parse_snowflake_prefixes():
+    ref = parse_model_ref("snowflake/claude-sonnet-4-5")
+    assert ref.bare_id == "claude-sonnet-4-5"
+    assert ref.prefix_hint == "snowflake"
+    assert parse_model_ref("cortex/claude-sonnet-4-5").prefix_hint == "cortex"
+
+
+def test_classify_snowflake_beats_claude_shape():
+    """Cortex serves claude-* ids — the prefix/hint must beat the shape rule."""
+    assert classify_model("snowflake/claude-sonnet-4-5") == "snowflake"
+    assert classify_model("cortex/claude-sonnet-4-5") == "snowflake"
+    assert classify_model("claude-opus-4-6", provider_hint="snowflake") == "snowflake"
+    assert classify_model("claude-sonnet-4-5") == "anthropic"  # bare id unchanged
+    assert api_key_field_for("snowflake") == "snowflake_api_key"
+
+
+def test_normalize_snowflake_hints():
+    from clawagents.providers.model_classify import normalize_provider_hint
+
+    assert normalize_provider_hint("snowflake") == "snowflake"
+    assert normalize_provider_hint("cortex") == "snowflake"
+    assert normalize_provider_hint("snowflake-cortex") == "snowflake"
+
+
+def test_provider_env_hint_snowflake_keeps_prefix():
+    """PROVIDER=snowflake must return a prefixed default so hint-less
+    callers (gateway) still route to Cortex instead of Anthropic."""
+    config = EngineConfig(snowflake_model="claude-sonnet-4-5")
+    with patch.dict(os.environ, {"PROVIDER": "snowflake"}, clear=False):
+        assert get_default_model(config) == "snowflake/claude-sonnet-4-5"
+    with patch.dict(os.environ, {"PROVIDER": "cortex"}, clear=False):
+        assert get_default_model(config) == "snowflake/claude-sonnet-4-5"

@@ -1190,7 +1190,10 @@ def _openai_chat_messages(messages: list[LLMMessage]) -> list[dict[str, Any]]:
                 "role": "assistant",
                 "content": m.content or None,
                 "tool_calls": [
-                    {"id": tc["id"], "type": "function", "function": {"name": tc["name"], "arguments": json.dumps(tc["args"])}}
+                    # ``args or {}``: no-arg calls must replay as "{}" — "null"
+                    # is rejected by strict backends (Snowflake Cortex 400s
+                    # with "required field 'input' is zero value").
+                    {"id": tc["id"], "type": "function", "function": {"name": tc["name"], "arguments": json.dumps(tc["args"] or {})}}
                     for tc in m.tool_calls_meta
                 ],
             })
@@ -3597,6 +3600,14 @@ def create_provider(
         base_url=config.openai_base_url,
         provider_hint=provider_hint or ref.prefix_hint,
     )
+
+    # ── Snowflake Cortex: OpenAI-compatible endpoint, Cortex-specific auth/URL.
+    # Must precede the claude*/gemini* shape branches — Cortex serves those ids.
+    if kind == "snowflake":
+        from clawagents.providers.snowflake import SnowflakeCortexProvider
+
+        config.openai_model = model_name
+        return SnowflakeCortexProvider(config)
 
     if kind == "gemini" or lower.startswith("gemini"):
         if not _HAS_GEMINI:

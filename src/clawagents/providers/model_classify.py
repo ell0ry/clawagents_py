@@ -33,6 +33,8 @@ LITELLM_PROVIDER_PREFIXES: tuple[str, ...] = (
     "openai/",
     "gemini/",
     "azure/",
+    "snowflake/",
+    "cortex/",
 )
 
 ProviderKind = Literal[
@@ -41,12 +43,14 @@ ProviderKind = Literal[
     "bedrock",
     "ollama",
     "openai",
+    "snowflake",
 ]
 
 ApiKeyField = Literal[
     "gemini_api_key",
     "anthropic_api_key",
     "openai_api_key",
+    "snowflake_api_key",
 ]
 
 
@@ -155,7 +159,9 @@ def normalize_provider_hint(hint: str | None) -> Optional[str]:
         return "gemini"
     if h in ("azure", "azure-openai"):
         return "openai"
-    if h in ("openai", "anthropic", "gemini", "bedrock", "ollama"):
+    if h in ("cortex", "snowflake-cortex"):
+        return "snowflake"
+    if h in ("openai", "anthropic", "gemini", "bedrock", "ollama", "snowflake"):
         return h
     return None
 
@@ -219,6 +225,8 @@ def api_key_field_for(
     """
     if kind == "gemini":
         return "gemini_api_key"
+    if kind == "snowflake":
+        return "snowflake_api_key"
     if kind == "anthropic":
         return "anthropic_api_key"
     if kind == "bedrock":

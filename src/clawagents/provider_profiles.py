@@ -55,6 +55,9 @@ BUILTIN_PROVIDER_PROFILES: dict[str, ProviderProfile] = {
         "",
         "bedrock",
     ),
+    # Snowflake Cortex (OpenAI-compatible Chat Completions). Requires
+    # SNOWFLAKE_PAT + SNOWFLAKE_ACCOUNT (or SNOWFLAKE_BASE_URL) in env/.env.
+    "snowflake": ProviderProfile("snowflake", "snowflake", "claude-sonnet-4-5"),
 }
 
 

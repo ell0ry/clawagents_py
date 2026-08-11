@@ -1,5 +1,6 @@
 import os
 from pathlib import Path
+from pydantic import AliasChoices, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 _loaded = False
@@ -14,6 +15,8 @@ _PROVIDER_SECRET_KEYS = (
     "GEMINI_API_KEY",
     "GOOGLE_API_KEY",
     "BEDROCK_API_KEY",
+    "SNOWFLAKE_PAT",
+    "SNOWFLAKE_API_KEY",
     "TAVILY_API_KEY",
     "ADVISOR_API_KEY",
     "AWS_ACCESS_KEY_ID",
@@ -163,6 +166,17 @@ class EngineConfig(BaseSettings):
     aws_secret_access_key: str = ""
     aws_session_token: str = ""
     bedrock_model: str = "us.anthropic.claude-sonnet-4-5-20250929-v1:0"
+    # Snowflake Cortex (OpenAI-compatible Chat Completions at
+    # https://<account>.snowflakecomputing.com/api/v2/cortex/v1). The key is a
+    # Snowflake programmatic access token (PAT); SNOWFLAKE_PAT is the
+    # conventional env name, SNOWFLAKE_API_KEY also accepted.
+    snowflake_api_key: str = Field(
+        default="",
+        validation_alias=AliasChoices("snowflake_api_key", "snowflake_pat"),
+    )
+    snowflake_account: str = ""  # account identifier, e.g. myorg-myaccount
+    snowflake_base_url: str = ""  # full URL override; wins over snowflake_account
+    snowflake_model: str = "claude-sonnet-4-5"
     max_tokens: int = 8192
     temperature: float = 0.0
     # OpenAI reasoning effort for o-series / GPT-5.5+ (none|low|medium|high|xhigh|max).
@@ -215,6 +229,9 @@ def get_default_model(config: EngineConfig) -> str:
         return config.anthropic_model
     if hint == "openai":
         return config.openai_model
+    if hint in ("snowflake", "cortex"):
+        # Keep the routing prefix — bare claude-* ids classify as anthropic.
+        return f"snowflake/{config.snowflake_model}"
     if config.openai_api_key:
         return config.openai_model
     if config.gemini_api_key:
