@@ -94,6 +94,78 @@ def test_preload_from_query_activates():
     assert registry.is_tool_active("weather_now")
 
 
+def _agent_with_catalog(catalog, registry):
+    """A ClawAgent whose invoke() returns immediately, for preload assertions."""
+    from clawagents.agent import ClawAgent
+    from clawagents.providers.llm import LLMProvider, LLMResponse
+
+    class _FakeLLM(LLMProvider):
+        name = "fake"
+
+        async def chat(self, messages, on_chunk=None, cancel_event=None, tools=None):
+            return LLMResponse(content="ok", model="fake", tokens_used=0)
+
+    agent = ClawAgent(llm=_FakeLLM(), tools=registry)
+    agent.streaming = False
+    agent.catalog = catalog
+    return agent
+
+
+def test_invoke_preloads_from_the_task_by_default():
+    registry, catalog = _setup(
+        base_allowed={"chat_basic", "weather_now", "weather_forecast"}
+    )
+    agent = _agent_with_catalog(catalog, registry)
+    asyncio.run(agent.invoke("what's the weather like today?"))
+    assert catalog.resolved_categories == {"weather"}
+
+
+def test_invoke_preload_text_overrides_the_task():
+    """A runtime that wraps the request in boilerplate can scope the matcher.
+
+    Without this the wrapper's own words resolve the same categories on every
+    run, identically, no matter what was actually asked.
+    """
+    registry, catalog = _setup(
+        base_allowed={"chat_basic", "weather_now", "weather_forecast", "lights_on"}
+    )
+    agent = _agent_with_catalog(catalog, registry)
+    agent.catalog_preload_text = "turn on the light"
+    asyncio.run(agent.invoke("turn on the light\n---\nAlways check the weather first."))
+    assert catalog.resolved_categories == {"smart_home"}
+    assert not registry.is_tool_active("weather_now")
+
+
+def test_keywords_match_on_word_boundaries_not_substrings():
+    from clawagents.tools.waterfall_catalog import keywords_match
+
+    # The bug this replaces: "log" fired inside "monologue" and "login".
+    assert not keywords_match(["log"], "no interior monologue please")
+    assert not keywords_match(["log"], "stopped at a login wall")
+    assert not keywords_match(["light"], "what a delightful idea")
+    assert not keywords_match(["resume"], "presume nothing")
+
+    assert keywords_match(["log"], "add it to the log")
+    # Inflections still count, so natural phrasing keeps resolving.
+    assert keywords_match(["log"], "logged it yesterday")  # doubled consonant
+    assert keywords_match(["rain"], "is it raining?")
+    assert keywords_match(["cloud"], "looks cloudy out")
+    assert keywords_match(["light"], "turn the lights on")
+    assert keywords_match(["resume"], "he resumed the run")
+
+
+def test_keywords_match_handles_punctuation_and_phrases():
+    from clawagents.tools.waterfall_catalog import keywords_match
+
+    assert keywords_match(["jobs@"], "forward it to jobs@eherring.com")
+    assert keywords_match(["to-do"], "put it on the to-do list")
+    assert keywords_match(["note to self"], "note to self: buy milk")
+    # Space padding was a workaround for substring matching; it is no longer
+    # needed, and a padded keyword still behaves.
+    assert keywords_match([" ig "], "posted it on ig, finally")
+    assert not keywords_match(["ig"], "I dig this")
+
+
 def test_no_base_allowed_defaults_to_all_registered():
     registry, catalog = _setup(base_allowed=None)
     # Everything registered at construction except deferred category tools.

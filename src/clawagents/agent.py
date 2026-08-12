@@ -245,9 +245,19 @@ class ClawAgent:
         # Waterfall catalog: keyword-preload matching categories before the
         # run so their schemas ride the first LLM call (the loop rebuilds
         # native schemas from the registry's active set every round).
+        #
+        # ``catalog_preload_text`` lets the caller nominate what the matcher
+        # sees. A runtime that wraps the user's request in boilerplate — a
+        # role contract, a report format, standing instructions — would
+        # otherwise resolve categories out of its own template on every run,
+        # identically, regardless of the task. The model still receives the
+        # full ``task``; only the keyword scan is narrowed.
         if getattr(self, "catalog", None) is not None:
             try:
-                self.catalog.preload_from_query(task)
+                preload_text = getattr(self, "catalog_preload_text", None)
+                self.catalog.preload_from_query(
+                    preload_text if preload_text is not None else task
+                )
             except Exception:
                 logger.debug("catalog preload failed", exc_info=True)
 
