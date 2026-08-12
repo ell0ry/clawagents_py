@@ -4926,11 +4926,23 @@ async def _run_agent_graph_core(
                             await _tax_permission_denied(
                                 c.tool_name, reason, source="before_tool",
                             )
+                            # Name the refused call and say why — the same
+                            # message the single-call path and the taxonomy
+                            # hook above already produce. Without it a
+                            # partially rejected batch told the model NOTHING
+                            # and a fully rejected one got an unnamed blanket
+                            # string, so it had nothing to correct against and
+                            # re-sent the same batch until the round cap.
+                            messages.append(
+                                LLMMessage(
+                                    role="user",
+                                    content=f"[Tool Skipped] {c.tool_name} was not approved: {reason}",
+                                )
+                            )
                         else:
                             approved_calls.append(result_call)
                             _approved_orig_indices.append(_orig_i)
                     if not approved_calls:
-                        messages.append(LLMMessage(role="user", content="[Tool Skipped] All tool calls were not approved."))
                         continue
                 else:
                     approved_calls = [c for _, c in _candidate_pairs]

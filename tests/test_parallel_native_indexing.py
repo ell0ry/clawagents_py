@@ -217,3 +217,56 @@ async def test_parallel_native_calls_honor_run_context_rejection():
 
     assert tools[0].calls == [{"x": "1"}]
     assert tools[1].calls == []
+
+
+@pytest.mark.asyncio
+async def test_rejected_parallel_calls_are_named_to_the_model():
+    """A refused call must say WHICH tool and WHY, in every batch shape.
+
+    This is what caps the blast radius of a bad tool name. The parallel path
+    used to emit a `tool_skipped` event and nothing else: a partially rejected
+    batch reached the model with no explanation at all, and a fully rejected
+    one got an unnamed "[Tool Skipped] All tool calls were not approved." With
+    nothing to correct against, the model re-sent the same batch until the
+    round cap — one glued name from a Cortex stream cost 74 requests and 5.4M
+    prompt tokens that way.
+    """
+    rounds = [
+        LLMResponse(
+            content="",
+            model="mock",
+            tokens_used=1,
+            tool_calls=[
+                NativeToolCall("alpha", {"x": "1"}, tool_call_id="id_a"),
+                NativeToolCall("beta", {"x": "2"}, tool_call_id="id_b"),
+            ],
+        ),
+        LLMResponse(content="", model="mock", tokens_used=1,
+                    tool_calls=[NativeToolCall("beta", {"x": "2"}, tool_call_id="id_b2")]),
+        LLMResponse(content="done", model="mock", tokens_used=1),
+    ]
+    llm = _NativeMockLLM(rounds)
+    reg, _tools = _build_registry("alpha", "beta")
+
+    def hook(name, args):
+        if name == "beta":
+            return HookResult(allowed=False, reason="there is no tool named 'beta'")
+        return HookResult(allowed=True)
+
+    await run_agent_graph(
+        "task", llm, tools=reg, streaming=False, on_event=lambda k, d: None,
+        before_tool=hook, use_native_tools=True, max_iterations=4,
+    )
+
+    def _texts(msgs):
+        return [m.content for m in msgs if isinstance(m.content, str)]
+
+    # Partially rejected batch: the surviving call ran, and the refusal is named.
+    partial = _texts(llm.received_messages[1])
+    assert any("beta was not approved" in t for t in partial), partial
+    assert any("there is no tool named 'beta'" in t for t in partial), partial
+
+    # Fully rejected batch: still named, not a blanket string.
+    full = _texts(llm.received_messages[2])
+    assert any("beta was not approved" in t for t in full), full
+    assert not any("All tool calls were not approved" in t for t in full), full
