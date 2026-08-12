@@ -1335,7 +1335,14 @@ def create_claw_agent(
     # Model harness: efficiency suffix / base prompt (e.g. GPT-5.6 Luna).
     # clear_tool_* knobs are consumed in the agent loop; this wires the prompt.
     # (excluded_tools is reserved — ToolRegistry has no unregister API yet.)
+    #
+    # The `harness_prompt_suffix` feature gates ONLY the prompt half: profiles
+    # match on model id, so a host whose agent is not a coding harness inherits
+    # lines like "verify with tests before claiming done" purely for running on
+    # Opus. Turning it off leaves clear_tool_*/compaction/loop-detection knobs
+    # in force (ada patch).
     try:
+        from clawagents.config.features import is_enabled as _feat_harness
         from clawagents.harness_profiles import (
             apply_harness_profile_to_prompt,
             resolve_harness_profile,
@@ -1346,8 +1353,10 @@ def create_claw_agent(
             if isinstance(model, str)
             else getattr(llm, "model", None) or getattr(model, "model", None)
         )
-        _harness = resolve_harness_profile(
-            str(_model_id) if _model_id else None
+        _harness = (
+            resolve_harness_profile(str(_model_id) if _model_id else None)
+            if _feat_harness("harness_prompt_suffix")
+            else None
         )
         if _harness is not None:
             resolved_instruction = apply_harness_profile_to_prompt(

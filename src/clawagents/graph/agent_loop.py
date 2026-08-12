@@ -542,6 +542,10 @@ class AgentState:
     ptrl_context: "PTRLContext | None" = None
 
 
+class _SkipBlock(Exception):
+    """Bail out of one optional prompt block without tripping its error log."""
+
+
 BASE_SYSTEM_PROMPT = """You are a ClawAgent, an AI assistant that helps users accomplish tasks using tools. You respond with text and tool calls.
 
 ## Core Behavior
@@ -3084,7 +3088,12 @@ async def _run_agent_graph_core(
                     dynamic_parts.append(rm)
                     emit("context", {"message": "injected ranked repo map"})
             # Workspace facts models need before inventing git /tmp paths.
+            # Hosts whose agents have no file/shell tools (or no git binary)
+            # turn this off — it otherwise advertises git_status/git_diff to a
+            # model that cannot call them (ada patch).
             try:
+                if not is_enabled("workspace_env"):
+                    raise _SkipBlock
                 import tempfile
                 from pathlib import Path as _P
 
@@ -3115,6 +3124,8 @@ async def _run_agent_graph_core(
                         else ""
                     )
                 )
+            except _SkipBlock:
+                pass
             except Exception:
                 logger.debug("workspace env preamble failed", exc_info=True)
         except Exception:

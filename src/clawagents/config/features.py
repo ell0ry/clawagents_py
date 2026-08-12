@@ -109,6 +109,13 @@ _FEATURE_DEFAULTS: dict[str, str] = {
     # to disable.
     "provider_circuit_breaker": "1",
     "tool_error_traceback": "0",   # Include short traceback in ToolResult.error (also CLAW_DEBUG)
+
+    # Engine-authored system-prompt blocks. On by default (unchanged
+    # behaviour); a host that writes its own complete instruction can turn
+    # them off rather than fight them. Each guards exactly one injection.
+    "model_identity":       "1",   # "## Model identity — You are ClawAgent…"
+    "workspace_env":        "1",   # "## Workspace env" (path, git, sandbox, scratch)
+    "harness_prompt_suffix": "1",  # HarnessProfile base_system_prompt / suffix
 }
 
 

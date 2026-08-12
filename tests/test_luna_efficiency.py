@@ -29,6 +29,35 @@ def test_harness_resolves_luna_and_injects_efficiency_suffix():
     assert "activate_tool_group" in text
 
 
+def test_harness_prompt_suffix_can_be_turned_off_without_losing_the_knobs():
+    """Profiles match on MODEL ID, so a non-coding host inherits coding advice.
+
+    Gating only the prompt half: the compaction / tool-clearing knobs are
+    genuinely model-shaped and must survive the opt-out.
+    """
+    from unittest.mock import MagicMock, patch
+
+    from clawagents.agent import create_claw_agent
+    from clawagents.config.features import temporary_overrides
+
+    def _build():
+        mock_llm = MagicMock()
+        with patch(
+            "clawagents.agent._resolve_model",
+            return_value=(mock_llm, "claude-opus-4", None),
+        ):
+            return create_claw_agent(
+                model="claude-opus-4", instruction="BASE", skills=[], memory=[]
+            )
+
+    assert "verify with tests" in (_build().system_prompt or "")
+    with temporary_overrides({"harness_prompt_suffix": False}):
+        assert (_build().system_prompt or "").strip() == "BASE"
+    # The profile itself still resolves, so clear_tool_* still apply in-loop.
+    with temporary_overrides({"harness_prompt_suffix": False}):
+        assert resolve_harness_profile("claude-opus-4").clear_tool_keep == 4
+
+
 def test_long_context_threshold_272k():
     assert resolve_long_context_threshold("gpt-5.6-luna") == 272_000
     assert resolve_long_context_threshold("gpt-5.6-sol") == 272_000

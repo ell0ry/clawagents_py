@@ -27,6 +27,22 @@ def test_append_model_identity_is_idempotent_and_skips_empty_model():
     assert twice == once
 
 
+def test_model_identity_can_be_turned_off_by_feature():
+    """A host that names its agent itself opts out of the second identity.
+
+    Distinct from the empty-model case: the section is perfectly renderable
+    here, we just decline to append it.
+    """
+    from clawagents.config.features import temporary_overrides
+
+    assert "## Model identity" in append_model_identity("base", "openai", "gpt-5.6")
+    with temporary_overrides({"model_identity": False}):
+        assert append_model_identity("base", "openai", "gpt-5.6") == "base"
+    # The renderer itself is untouched — only the append site is gated.
+    with temporary_overrides({"model_identity": False}):
+        assert "## Model identity" in model_identity_section("openai", "gpt-5.6")
+
+
 def test_model_identity_stays_in_static_cache_prefix():
     base = append_model_identity("base instructions", "openai", "gpt-5.6-luna")
     system = build_system_prompt(

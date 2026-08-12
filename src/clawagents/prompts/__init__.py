@@ -44,8 +44,20 @@ def append_model_identity(
     provider: Optional[str],
     model: Optional[str],
 ) -> str:
-    """Append :func:`model_identity_section` unless already present."""
+    """Append :func:`model_identity_section` unless already present.
+
+    Skipped entirely when the ``model_identity`` feature is off — a host that
+    names the agent itself in its own instruction does not want a second,
+    contradicting identity block appended underneath it (ada patch).
+    """
     base = base_prompt or ""
+    try:
+        from clawagents.config.features import is_enabled
+
+        if not is_enabled("model_identity"):
+            return base
+    except Exception:  # pragma: no cover - features module always importable
+        pass
     block = model_identity_section(provider, model)
     if not block or "## Model identity" in base:
         return base
