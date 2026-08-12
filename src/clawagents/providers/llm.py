@@ -618,27 +618,66 @@ def accumulate_tool_call_delta(
     together. A new id therefore always opens a new slot; deltas without an id
     are continuations and route by index, which for id-less providers resolves
     to the slot most recently opened there.
+
+    Two things make that id rule alone insufficient, and both are guarded
+    below, because the failure is silent and expensive — the glued name is
+    dispatched as a real tool call, refused, and retried until the round cap:
+
+    * a batch whose second call opens with no id at all (or repeats the first
+      call's id) would land on the first call's slot;
+    * slot numbers come from ``len(tools)`` and share an integer namespace with
+      raw wire indexes, so an index-keyed lookup can collide with an
+      id-allocated slot.
+
+    The invariant that catches all of them: **a name fragment arriving at a
+    slot whose name already looks complete starts a new call.** A provider
+    streaming one name in pieces sends those pieces back to back with no
+    arguments in between, which is what ``_awaiting_args`` distinguishes.
     """
     idx = tc.index if getattr(tc, "index", None) is not None else 0
     tc_id = getattr(tc, "id", None) or ""
-    if tc_id:
-        if tc_id not in slot_of_id:
-            slot_of_id[tc_id] = len(tools)
+    fn = getattr(tc, "function", None)
+    fn_name = getattr(fn, "name", "") or ""
+    fn_args = getattr(fn, "arguments", "") or ""
+
+    if tc_id and tc_id not in slot_of_id:
+        slot_of_id[tc_id] = len(tools)
+        slot = slot_of_id[tc_id]
+        slot_of_index[idx] = slot
+    elif tc_id:
         slot = slot_of_id[tc_id]
         slot_of_index[idx] = slot
     else:
         slot = slot_of_index.get(idx, idx)
-    if slot not in tools:
-        tools[slot] = {"id": "", "name": "", "arguments": ""}
+
+    current = tools.get(slot)
+    if (
+        current is not None
+        and fn_name
+        and current["name"]
+        and not current.get("_awaiting_args")
+    ):
+        # This slot already holds a finished call. Whatever this is, it is not
+        # a continuation of it — open a new slot rather than gluing the names.
+        slot = len(tools)
+        while slot in tools:
+            slot += 1
+        slot_of_index[idx] = slot
+        if tc_id:
+            slot_of_id[tc_id] = slot
+        current = None
+
+    if current is None:
+        tools[slot] = {"id": "", "name": "", "arguments": "", "_awaiting_args": True}
         slot_of_index.setdefault(idx, slot)
     if tc_id:
         tools[slot]["id"] = tc_id
-    fn = getattr(tc, "function", None)
-    if fn is not None:
-        if fn.name:
-            tools[slot]["name"] += fn.name
-        if fn.arguments:
-            tools[slot]["arguments"] += fn.arguments
+    if fn_name:
+        tools[slot]["name"] += fn_name
+    if fn_args:
+        # Arguments have started, so the name is settled.
+        tools[slot]["_awaiting_args"] = False
+        tools[slot]["arguments"] += fn_args
 
 
 def _openai_cached_tokens(usage: Any) -> int:

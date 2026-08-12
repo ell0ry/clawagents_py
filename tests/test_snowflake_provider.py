@@ -332,6 +332,62 @@ def test_cortex_parallel_tool_calls_share_index_zero():
     assert calls[1]["arguments"] == '{"window_id": "abc123"}'
 
 
+def test_second_call_opening_without_an_id_still_splits():
+    """The residual path: id-keying alone cannot see this one coming.
+
+    Every delta is index=0 and the second call arrives with no id, so both the
+    index map and the id map point at slot 0. Without the "a name arriving at
+    a finished slot starts a new call" rule the two names glue, and the agent
+    dispatches a tool that does not exist.
+    """
+    deltas = [
+        _TcDelta(0, "toolu_bdrk_014Z", "get_weather"),
+        _TcDelta(0, "", "", '{"city": "Houston"}'),
+        _TcDelta(0, "", "get_forecast"),  # no id, no fresh index
+        _TcDelta(0, "", "", '{"days": 3}'),
+    ]
+    calls = _accumulate(deltas)
+    assert [c["name"] for c in calls] == ["get_weather", "get_forecast"]
+    assert calls[0]["arguments"] == '{"city": "Houston"}'
+    assert calls[1]["arguments"] == '{"days": 3}'
+
+
+def test_second_call_repeating_the_first_id_still_splits():
+    """A proxy that stamps the message id on every call, not a per-call id."""
+    deltas = [
+        _TcDelta(0, "msg_1", "get_weather"),
+        _TcDelta(0, "msg_1", "", '{"city": "Houston"}'),
+        _TcDelta(0, "msg_1", "get_forecast"),
+        _TcDelta(0, "msg_1", "", '{"days": 3}'),
+    ]
+    calls = _accumulate(deltas)
+    assert [c["name"] for c in calls] == ["get_weather", "get_forecast"]
+
+
+def test_index_colliding_with_an_id_allocated_slot_does_not_merge():
+    """Slot numbers come from len(tools) and share a namespace with indexes."""
+    deltas = [
+        _TcDelta(5, "call_a", "get_weather"),  # index 5 → slot 0
+        _TcDelta(5, "", "", '{"city": "Houston"}'),
+        _TcDelta(0, "", "get_forecast"),  # raw index 0 == slot 0
+        _TcDelta(0, "", "", '{"days": 3}'),
+    ]
+    calls = _accumulate(deltas)
+    assert [c["name"] for c in calls] == ["get_weather", "get_forecast"]
+    assert calls[0]["arguments"] == '{"city": "Houston"}'
+
+
+def test_a_name_streamed_in_fragments_is_not_split():
+    """The counterweight: pieces of ONE name must still concatenate."""
+    deltas = [
+        _TcDelta(0, "call_a", "get_"),
+        _TcDelta(0, "", "weather"),
+        _TcDelta(0, "", "", "{}"),
+    ]
+    calls = _accumulate(deltas)
+    assert [c["name"] for c in calls] == ["get_weather"]
+
+
 def test_openai_style_distinct_indexes_still_route_by_index():
     """The OpenAI contract must keep working: interleaved argument deltas."""
     deltas = [
@@ -346,3 +402,4 @@ def test_openai_style_distinct_indexes_still_route_by_index():
     assert [c["name"] for c in calls] == ["get_weather", "get_forecast"]
     assert calls[0]["arguments"] == '{"city": "Houston"}'
     assert calls[1]["arguments"] == '{"days": 3}'
+
