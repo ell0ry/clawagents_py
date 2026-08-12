@@ -98,8 +98,15 @@ class SnowflakeCortexProvider(OpenAIProvider):
         config.openai_api_version = ""
         super().__init__(config)
         # Cortex rejects OpenAI-style ``reasoning_effort`` on claude-* models.
+        # It DOES accept the Anthropic content-block shape for the system
+        # message, so claude-* is also where a ``cache_control`` breakpoint is
+        # honoured — cache reads bill at a fraction of fresh input, and Ada's
+        # static prefix (base prompt + tool description) is comfortably over
+        # the 1024-token minimum a read needs to qualify. Only ephemeral is
+        # supported, with a 5-minute TTL.
         if (self.model or "").lower().startswith("claude"):
             self._reasoning_effort = None
+            self._emit_cache_control = True
 
     async def _chat_dispatch(self, formatted, *args, **kwargs):
         return await super()._chat_dispatch(

@@ -403,3 +403,57 @@ def test_openai_style_distinct_indexes_still_route_by_index():
     assert calls[0]["arguments"] == '{"city": "Houston"}'
     assert calls[1]["arguments"] == '{"days": 3}'
 
+
+# ── prompt caching ───────────────────────────────────────────────────────────
+
+
+def _system_of(formatted):
+    return next(m for m in formatted if m["role"] == "system")["content"]
+
+
+def test_cache_control_splits_the_system_message_at_the_boundary():
+    from clawagents.providers.llm import LLMMessage, _openai_chat_messages
+
+    msgs = [
+        LLMMessage(role="system", content="STATIC PREFIX\n__CACHE_BOUNDARY__\nlessons"),
+        LLMMessage(role="user", content="hi"),
+    ]
+    blocks = _system_of(_openai_chat_messages(msgs, cache_control=True))
+    assert [b["text"] for b in blocks] == ["STATIC PREFIX", "lessons"]
+    assert blocks[0]["cache_control"] == {"type": "ephemeral"}
+    assert "cache_control" not in blocks[1], "only the static half is a breakpoint"
+
+
+def test_cache_control_off_still_strips_the_marker():
+    """The default must not change for any other OpenAI-compatible backend."""
+    from clawagents.providers.llm import LLMMessage, _openai_chat_messages
+
+    msgs = [LLMMessage(role="system", content="STATIC\n__CACHE_BOUNDARY__\nlessons")]
+    content = _system_of(_openai_chat_messages(msgs))
+    assert isinstance(content, str)
+    assert "__CACHE_BOUNDARY__" not in content
+
+
+def test_cache_control_with_no_boundary_is_a_single_block():
+    from clawagents.providers.llm import LLMMessage, _openai_chat_messages
+
+    msgs = [LLMMessage(role="system", content="no marker here")]
+    content = _system_of(_openai_chat_messages(msgs, cache_control=True))
+    # No boundary → nothing to split, and no breakpoint invented.
+    assert content == "no marker here"
+
+
+def test_cortex_enables_cache_control_only_for_claude(monkeypatch):
+    from clawagents.config.config import EngineConfig
+    from clawagents.providers.snowflake import SnowflakeCortexProvider
+
+    def _mk(model):
+        cfg = EngineConfig(
+            openai_model=model,
+            snowflake_api_key="pat",
+            snowflake_base_url="https://acct.snowflakecomputing.com/api/v2/cortex/v1",
+        )
+        return SnowflakeCortexProvider(cfg)
+
+    assert _mk("claude-opus-4-7")._emit_cache_control is True
+    assert getattr(_mk("llama3-70b"), "_emit_cache_control", False) is False

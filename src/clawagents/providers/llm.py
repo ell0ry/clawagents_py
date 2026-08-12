@@ -1214,7 +1214,40 @@ def _openai_part_from_block(part: dict[str, Any]) -> dict[str, Any] | None:
     return None
 
 
-def _openai_chat_messages(messages: list[LLMMessage]) -> list[dict[str, Any]]:
+def _cache_control_system(content: str) -> list[dict[str, Any]]:
+    """Split a system message at the cache boundary into cache-marked blocks.
+
+    Anthropic-family models behind an OpenAI-compatible gateway (Snowflake
+    Cortex is the one this exists for) accept the Anthropic content-block
+    shape, including ``cache_control``, and report hits back as
+    ``usage.prompt_tokens_details.cached_tokens`` — which
+    :func:`_openai_cached_tokens` already reads. The breakpoint goes on the
+    STATIC half so the cache covers the base prompt and tool description; the
+    dynamic tail (lessons, per-round injections) rides uncached after it.
+
+    Caching only pays if the prefix is byte-stable across requests, so a hook
+    that rewrites the system message per round defeats this entirely.
+    """
+    # Literal, not the ``clawagents.prompts`` constant: that module imports
+    # from this one, so the reference would be circular.
+    static, sep, dynamic = content.partition("__CACHE_BOUNDARY__")
+    if not sep:
+        return [{"type": "text", "text": content}]
+    blocks: list[dict[str, Any]] = [
+        {
+            "type": "text",
+            "text": static.strip(),
+            "cache_control": {"type": "ephemeral"},
+        }
+    ]
+    if dynamic.strip():
+        blocks.append({"type": "text", "text": dynamic.strip()})
+    return blocks
+
+
+def _openai_chat_messages(
+    messages: list[LLMMessage], *, cache_control: bool = False
+) -> list[dict[str, Any]]:
     """Format LLMMessages for the OpenAI wire (Chat Completions directly;
     the Responses path converts further via ``_messages_to_responses_input``).
 
@@ -1278,6 +1311,11 @@ def _openai_chat_messages(messages: list[LLMMessage]) -> list[dict[str, Any]]:
             _flush_media()
             content = m.content
             if isinstance(content, str) and "__CACHE_BOUNDARY__" in content:
+                if cache_control and m.role == "system":
+                    formatted.append(
+                        {"role": m.role, "content": _cache_control_system(content)}
+                    )
+                    continue
                 content = content.replace("__CACHE_BOUNDARY__", "").strip()
             formatted.append({"role": m.role, "content": content})
     _flush_media()
@@ -1368,7 +1406,11 @@ class OpenAIProvider(LLMProvider):
         session_id: str | None = None,
         on_first_token: Any | None = None,
     ) -> LLMResponse:
-        formatted = _sanitize_openai_tool_pairs(_openai_chat_messages(messages))
+        formatted = _sanitize_openai_tool_pairs(
+            _openai_chat_messages(
+                messages, cache_control=getattr(self, "_emit_cache_control", False)
+            )
+        )
         oai_tools = _to_openai_tools(tools) if tools else None
 
         try:
