@@ -19,10 +19,52 @@ collision.)
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Set
+from functools import lru_cache
+from typing import Any, Dict, List, Optional, Sequence, Set
 
 from clawagents.tools.registry import Tool, ToolResult
+
+# Common English inflections a keyword should still match ("rain" → "raining",
+# "cloud" → "cloudy", "log" → "logged"). A bare word boundary is too strict for
+# natural phrasing; a bare prefix is too loose ("log" would take "login"). The
+# optional repeat of the final letter covers doubled consonants (log → logged).
+_INFLECTIONS = "(?:s|es|d|ed|ing|y)"
+
+
+@lru_cache(maxsize=512)
+def _keyword_pattern(keywords: tuple) -> Optional[re.Pattern]:
+    """Compile *keywords* into one word-boundary-anchored alternation.
+
+    Plain substring matching was the original design and it misfired badly:
+    ``"log"`` matched *monologue*, ``"light"`` matched any sentence containing
+    the word inside another, and the keyword lists had grown space-padded
+    workarounds (``" ig "``, ``" cv "``) to fake the boundaries this provides.
+    Padding is stripped here, so those entries can be written plainly.
+
+    A keyword that starts or ends with punctuation (``"jobs@"``) is anchored
+    only on the side where ``\\b`` can bite.
+    """
+    parts: list[str] = []
+    for raw in keywords:
+        kw = (raw or "").strip().lower()
+        if not kw:
+            continue
+        body = re.escape(kw)
+        left = r"\b" if kw[0].isalnum() else ""
+        tail = ""
+        if kw[-1].isalnum():
+            doubled = re.escape(kw[-1])
+            tail = f"(?:{doubled}?{_INFLECTIONS})?" + r"\b"
+        parts.append(f"{left}{body}{tail}")
+    return re.compile("|".join(parts)) if parts else None
+
+
+def keywords_match(keywords: Sequence[str], text: str) -> bool:
+    """True when any keyword occurs as a word (or inflection) in *text*."""
+    pattern = _keyword_pattern(tuple(keywords or ()))
+    return bool(pattern and pattern.search((text or "").lower()))
 
 
 @dataclass
@@ -160,18 +202,19 @@ class ToolCatalog:
     def preload_from_query(self, task: str) -> list[str]:
         """Keyword-match the user query and auto-resolve matching categories.
 
+        Matching is on word boundaries (see :func:`keywords_match`), so a
+        keyword only fires on the word it names — not on any longer word that
+        happens to contain it.
+
         Returns list of category names that were pre-loaded.
         """
-        task_lower = task.lower()
         loaded: list[str] = []
         for cat in self._categories.values():
             if cat.name in self._resolved:
                 continue
-            for kw in cat.keywords:
-                if kw in task_lower:
-                    self.resolve(cat.name)
-                    loaded.append(cat.name)
-                    break
+            if keywords_match(cat.keywords, task):
+                self.resolve(cat.name)
+                loaded.append(cat.name)
         return loaded
 
     def catalog_prompt(self) -> str:
