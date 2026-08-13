@@ -38,6 +38,7 @@ class LLMMessage:
         tool_calls_meta: list[dict[str, Any]] | None = None,
         gemini_parts: list[dict[str, Any]] | None = None,
         thinking: str | None = None,
+        cache_breakpoint: bool = False,
     ):
         self.role = role
         self.content = content
@@ -45,6 +46,12 @@ class LLMMessage:
         self.tool_calls_meta = tool_calls_meta    # For role="assistant": list of {id, name, args}
         self.gemini_parts = gemini_parts          # Preserved Gemini response parts (thought/thought_signature)
         self.thinking = thinking                  # Feature H: preserved <think> block content
+        # Ask for a cache breakpoint AFTER this message (ada patch). The system
+        # message gets one from __CACHE_BOUNDARY__; this is the same mechanism
+        # for the message list, which is the only way to cache replayed history.
+        # It only pays if the host also keeps everything after it stable — a
+        # per-round block anywhere earlier makes the whole prefix miss.
+        self.cache_breakpoint = cache_breakpoint
 
 
 class NativeToolSchema:
@@ -1317,6 +1324,25 @@ def _openai_chat_messages(
                     )
                     continue
                 content = content.replace("__CACHE_BOUNDARY__", "").strip()
+            # A breakpoint on a MESSAGE, so replayed history can be cached
+            # (ada patch). Anthropic caches the contiguous prefix up to each
+            # breakpoint; without one here, the system message is the furthest
+            # the cache can ever reach and every turn re-sends the whole
+            # transcript at full rate.
+            if (
+                cache_control
+                and getattr(m, "cache_breakpoint", False)
+                and isinstance(content, str)
+            ):
+                formatted.append({
+                    "role": m.role,
+                    "content": [{
+                        "type": "text",
+                        "text": content,
+                        "cache_control": {"type": "ephemeral"},
+                    }],
+                })
+                continue
             formatted.append({"role": m.role, "content": content})
     _flush_media()
     return formatted

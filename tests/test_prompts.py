@@ -125,3 +125,34 @@ def test_append_prompt_injection_returns_original_when_no_injection():
     messages = [LLMMessage(role="system", content="base")]
 
     assert append_prompt_injection(messages, None) is messages
+
+
+def test_message_cache_breakpoint_reaches_the_wire():
+    """A breakpoint on a MESSAGE, so replayed history can be cached (ada patch).
+
+    Without it the system message is the furthest a prefix cache can ever
+    reach, and every turn re-sends the whole transcript at full rate.
+    """
+    from clawagents.providers.llm import _openai_chat_messages
+
+    msgs = [
+        LLMMessage(role="system", content="BASE\n__CACHE_BOUNDARY__\nvolatile"),
+        LLMMessage(role="user", content="earlier"),
+        LLMMessage(role="user", content="the last stable turn", cache_breakpoint=True),
+        LLMMessage(role="user", content="volatile tail"),
+    ]
+    out = _openai_chat_messages(msgs, cache_control=True)
+
+    marked = [
+        m for m in out
+        if isinstance(m["content"], list)
+        and any(b.get("cache_control") for b in m["content"])
+    ]
+    assert len(marked) == 2, "one on system, one on the last stable message"
+    assert marked[1]["content"][0]["text"] == "the last stable turn"
+    # Unmarked messages stay plain strings — no gratuitous reshaping.
+    assert out[-1]["content"] == "volatile tail"
+
+    # And the flag is inert unless the provider opted in.
+    off = _openai_chat_messages(msgs, cache_control=False)
+    assert all(isinstance(m["content"], str) for m in off)
